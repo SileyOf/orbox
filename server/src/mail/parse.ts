@@ -24,7 +24,7 @@ export const makeSnippet = (text: string) => text.replace(/\s+/g, ' ').trim().sl
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', nbsp: ' ', '#39': "'" };
 
 /** 粗略去标签，只用于摘要和搜索，不用于展示 */
-function htmlToPlain(html: string): string {
+export function htmlToPlain(html: string): string {
   return html
     .replace(/<(style|script|head|title)[\s\S]*?<\/\1>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')

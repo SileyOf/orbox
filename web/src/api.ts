@@ -7,6 +7,10 @@ export interface UserSettings {
   digestTime: string;
   nagInterval: number;
   blockRemoteImages: boolean;
+  vipSenders: string[];
+  mutedSenders: string[];
+  codeAlways: boolean;
+  channels: { bark: string; ntfy: string; webhook: string };
 }
 
 export interface User {
@@ -70,6 +74,8 @@ export interface MessageItem {
   answered: number;
   has_attachments: number;
   snippet: string;
+  code: string | null;
+  snoozed_until: string | null;
   folder_role: Folder['role'];
   folder_name: string;
 }
@@ -106,6 +112,7 @@ export interface Task {
   remind_before: number;
   repeat_rule: RepeatRule | null;
   priority: number;
+  tags: string[] | null;
   status: 'open' | 'done';
   completed_at: string | null;
   next_remind_at: string | null;
@@ -121,7 +128,18 @@ export interface TaskInput {
   remindBefore?: number;
   repeat?: RepeatRule | null;
   priority?: number;
+  tags?: string[];
   nagInterval?: number;
+}
+
+export interface OutboxItem {
+  id: number;
+  account_id: number;
+  send_at: string;
+  subject: string;
+  recipients: string;
+  status: 'pending' | 'sending' | 'failed';
+  error: string | null;
 }
 
 export class ApiError extends Error {

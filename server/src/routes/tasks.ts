@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { requireUser } from '../auth.js';
 import { randomToken } from '../crypto.js';
 import { exec, one } from '../db.js';
+import { sendChannel } from '../notify/channels.js';
 import { botUsername, sendDigest, sendTest, telegramEnabled } from '../notify/telegram.js';
 import { parseQuickTask } from '../tasks/parse.js';
 import {
@@ -16,6 +17,7 @@ const taskBody = z.object({
   remindBefore: z.number().int().min(0).max(10080).optional(),
   repeat: repeatRule.nullish(),
   priority: z.number().int().min(0).max(2).optional(),
+  tags: z.array(z.string().trim().min(1).max(30)).max(10).optional(),
   nagInterval: z.number().int().min(0).max(1440).optional(),
 });
 
@@ -110,5 +112,18 @@ export async function taskRoutes(app: FastifyInstance) {
     const { kind } = z.object({ kind: z.enum(['ping', 'digest']).default('ping') }).parse(req.body ?? {});
     const sent = kind === 'digest' ? await sendDigest(req.user) : await sendTest(req.user.id);
     return sent ? { ok: true } : reply.code(400).send({ error: '尚未绑定 Telegram' });
+  });
+
+  // 保存前先试发一条，地址填错能立刻发现
+  app.post('/api/notify/test', async (req, reply) => {
+    const body = z
+      .object({ channel: z.enum(['bark', 'ntfy', 'webhook']), target: z.string().trim().url().max(500) })
+      .parse(req.body);
+    try {
+      await sendChannel(body.channel, body.target, { title: 'Orbox 测试通知', body: '看到这条说明通道已连通。' });
+    } catch (e: any) {
+      return reply.code(400).send({ error: `发送失败：${e.message}` });
+    }
+    return { ok: true };
   });
 }

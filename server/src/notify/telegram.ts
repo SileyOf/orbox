@@ -6,7 +6,6 @@ import { APP_NAME, config } from '../config.js';
 import { getUser } from '../auth.js';
 import type { User } from '../auth.js';
 import { exec, one, query } from '../db.js';
-import type { AccountRow } from '../mail/manager.js';
 import { moveMessages, setFlag } from '../routes/mail.js';
 import { formatWhen, parseQuickTask } from '../tasks/parse.js';
 import { completeTask, createTask, deleteTask, dueToday, skipTask, snoozeTask } from '../tasks/service.js';
@@ -44,29 +43,37 @@ async function send(userId: number, html: string, keyboard?: InlineKeyboard): Pr
   return true;
 }
 
-function inQuietHours(user: User): boolean {
-  const { quietStart, quietEnd } = user.settings;
-  if (quietStart === quietEnd) return false;
-  const now = DateTime.now().setZone(user.timezone).toFormat('HH:mm');
-  return quietStart < quietEnd ? now >= quietStart && now < quietEnd : now >= quietStart || now < quietEnd;
+export interface MailCard {
+  id: number;
+  subject: string;
+  from_name: string;
+  from_addr: string;
+  snippet: string;
+  code: string | null;
 }
 
-export async function notifyNewMail(account: AccountRow, messageId: number): Promise<void> {
-  if (!bot || !account.notify) return;
-  const user = await getUser(account.user_id);
-  if (!user || !user.settings.notifyMail || inQuietHours(user)) return;
-  const m = await one('SELECT id, subject, from_name, from_addr, snippet FROM messages WHERE id = ?', [messageId]);
-  if (!m) return;
-  const kb = new InlineKeyboard()
-    .text('标记已读', `m:r:${m.id}`)
-    .text('归档', `m:a:${m.id}`)
-    .row()
-    .text('转为待办', `m:t:${m.id}`);
+/** 新邮件卡片。带验证码时把码放在最上面并给一个"复制"按钮，其余信息压缩成一行 */
+export async function sendMailCard(
+  user: User,
+  accountName: string,
+  m: MailCard,
+  opts: { vip?: boolean; resurfaced?: boolean } = {},
+): Promise<boolean> {
+  const kb = new InlineKeyboard();
+  if (m.code) kb.copyText(`复制 ${m.code}`, m.code).row();
+  kb.text('标记已读', `m:r:${m.id}`).text('归档', `m:a:${m.id}`);
+  if (!m.code) kb.row().text('转为待办', `m:t:${m.id}`);
   if (linkable) kb.url('打开', `${config.publicUrl}/mail?open=${m.id}`);
-  const from = m.from_name ? `<b>${esc(m.from_name)}</b> &lt;${esc(m.from_addr)}&gt;` : `<b>${esc(m.from_addr)}</b>`;
-  await send(
+  const sender = esc(m.from_name || m.from_addr);
+  const subject = esc(m.subject || '(无主题)');
+  if (m.code) {
+    return send(user.id, `🔑 <code>${esc(m.code)}</code>\n<b>${sender}</b> · ${subject}\n<i>${esc(accountName)}</i>`, kb);
+  }
+  const icon = opts.resurfaced ? '⏰ 稍后处理的邮件到时间了\n' : opts.vip ? '⭐ ' : '📬 ';
+  const from = m.from_name ? `<b>${sender}</b> &lt;${esc(m.from_addr)}&gt;` : `<b>${sender}</b>`;
+  return send(
     user.id,
-    `📬 ${from}\n<b>${esc(m.subject || '(无主题)')}</b>\n\n${esc(clip(m.snippet, 280))}\n\n<i>${esc(account.name)}</i>`,
+    `${icon}${from}\n<b>${subject}</b>\n\n${esc(clip(m.snippet, 280))}\n\n<i>${esc(accountName)}</i>`,
     kb,
   );
 }
@@ -86,9 +93,7 @@ function taskLine(task: TaskRow, tz: string): string {
   return `<b>${esc(task.title)}</b>${when}${notes}`;
 }
 
-export async function notifyTaskReminder(task: TaskRow, nth: number): Promise<boolean> {
-  const user = await getUser(task.user_id);
-  if (!user) return false;
+export async function sendTaskReminder(user: User, task: TaskRow, nth: number): Promise<boolean> {
   const head = nth > 0 ? `🔔 还没完成（第 ${nth + 1} 次提醒）` : '⏰ 提醒';
   return send(user.id, `${head}\n${taskLine(task, user.timezone)}`, taskKeyboard(task.id));
 }

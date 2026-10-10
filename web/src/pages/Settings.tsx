@@ -165,6 +165,21 @@ export function Settings() {
               <span className="muted">至</span>
               <input className="input" type="time" value={s.quietEnd} onChange={(e) => e.target.value && set({ quietEnd: e.target.value })} />
             </Setting>
+            <Setting title="验证码邮件始终通知" hint="识别到验证码的邮件无视免打扰时段，通知里直接带上验证码和复制按钮">
+              <Switch checked={s.codeAlways} onChange={(v) => set({ codeAlways: v })} />
+            </Setting>
+            <SenderRule
+              title="重点发件人"
+              hint="始终通知并加星标记，不受免打扰限制。每行一个邮箱地址或域名"
+              value={s.vipSenders}
+              onSave={(v) => set({ vipSenders: v })}
+            />
+            <SenderRule
+              title="屏蔽通知的发件人"
+              hint="这些发件人的邮件照常接收，但不推送。每行一个邮箱地址或域名"
+              value={s.mutedSenders}
+              onSave={(v) => set({ mutedSenders: v })}
+            />
             <Setting title="每日早报" hint="汇总今天的计划和未读邮件数">
               {s.digestTime && <input className="input" type="time" value={s.digestTime} onChange={(e) => e.target.value && set({ digestTime: e.target.value })} />}
               <Switch checked={!!s.digestTime} onChange={(v) => set({ digestTime: v ? '08:30' : '' })} />
@@ -190,10 +205,66 @@ export function Settings() {
           </div>
         </section>
 
+        <section className="section">
+          <h2>更多通知通道</h2>
+          <div className="card">
+            <Channel name="bark" title="Bark（iOS）" placeholder="https://api.day.app/你的Key" hint="验证码会自动进入剪贴板" value={s.channels.bark} onSave={(v) => set({ channels: { ...s.channels, bark: v } })} />
+            <Channel name="ntfy" title="ntfy" placeholder="https://ntfy.sh/你的主题" hint="填完整的主题地址，支持自建服务器" value={s.channels.ntfy} onSave={(v) => set({ channels: { ...s.channels, ntfy: v } })} />
+            <Channel name="webhook" title="Webhook" placeholder="https://example.com/hook" hint="每条通知以 JSON POST 到这个地址，字段有 title、body、text、url、code" value={s.channels.webhook} onSave={(v) => set({ channels: { ...s.channels, webhook: v } })} />
+          </div>
+          <div className="muted small">这些通道只能单向推送，没有 Telegram 那样的操作按钮。新邮件和计划提醒会同时发往所有已填写的通道。</div>
+        </section>
+
         <Profile onLogout={logout} />
         <div className="muted small" style={{ textAlign: 'center' }}>Orbox {about.data?.version && `v${about.data.version}`} · 起源</div>
       </div>
       {editing && <AccountDialog account={editing === 'new' ? null : editing} onClose={() => setEditing(null)} />}
+    </div>
+  );
+}
+
+function SenderRule(props: { title: string; hint: string; value: string[]; onSave: (v: string[]) => void }) {
+  const [text, setText] = useState(props.value.join('\n'));
+  const parse = () => [...new Set(text.split(/[\n,，;；\s]+/).map((v) => v.trim().toLowerCase()).filter((v) => v.length >= 3))];
+  return (
+    <div className="setting" style={{ alignItems: 'flex-start' }}>
+      <div>
+        <div>{props.title}</div>
+        <div className="muted small">{props.hint}</div>
+      </div>
+      <textarea
+        className="textarea"
+        style={{ width: 260, minHeight: 64 }}
+        placeholder={'boss@example.com\ngithub.com'}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => parse().join() !== props.value.join() && props.onSave(parse())}
+      />
+    </div>
+  );
+}
+
+function Channel(props: { name: string; title: string; placeholder: string; hint: string; value: string; onSave: (v: string) => void }) {
+  const [url, setUrl] = useState(props.value);
+  const test = () =>
+    api('/notify/test', { body: { channel: props.name, target: url.trim() } })
+      .then(() => toast('已发送测试通知'))
+      .catch(toastError);
+  return (
+    <div className="setting">
+      <div>
+        <div>{props.title}</div>
+        <div className="muted small">{props.hint}</div>
+      </div>
+      <input
+        className="input"
+        style={{ width: 280 }}
+        placeholder={props.placeholder}
+        value={url}
+        onChange={(e) => setUrl(e.target.value)}
+        onBlur={() => url.trim() !== props.value && props.onSave(url.trim())}
+      />
+      <button className="btn sm" disabled={!url.trim()} onClick={test}>测试</button>
     </div>
   );
 }

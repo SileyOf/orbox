@@ -3,7 +3,8 @@ import type { ServerResponse } from 'node:http';
 // 进程内事件总线：把服务端变化通过 SSE 推给该用户所有打开的页面
 export type AppEvent =
   | { type: 'mail'; accountId: number; folderId?: number }
-  | { type: 'new-mail'; id: number; from: string; subject: string }
+  | { type: 'new-mail'; id: number; from: string; subject: string; code: string | null }
+  | { type: 'outbox' }
   | { type: 'accounts' }
   | { type: 'tasks' }
   | { type: 'reminder'; id: number; title: string };

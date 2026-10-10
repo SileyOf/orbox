@@ -1,5 +1,5 @@
 import {
-  AlarmClock, BellRing, CalendarDays, Check, ChevronLeft, ChevronRight, Mail, Pencil, Plus, Repeat, RotateCcw, Trash2,
+  AlarmClock, BellRing, CalendarDays, Check, ChevronLeft, ChevronRight, Hash, Mail, Pencil, Plus, Repeat, RotateCcw, Trash2,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
@@ -56,6 +56,7 @@ export function Planner() {
   const [quick, setQuick] = useState('');
   const [editing, setEditing] = useState<Task | 'new' | null>(null);
   const [day, setDay] = useState<Date | null>(null);
+  const [tag, setTag] = useState<string | null>(null);
   const [month, setMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
 
   const act = (path: string, body: unknown = {}) => api(path, { method: 'POST', body }).catch(toastError);
@@ -74,7 +75,10 @@ export function Planner() {
     }
   }
 
-  const visible = day ? open.filter((t) => t.due_at && dayKey(new Date(t.due_at)) === dayKey(day)) : open;
+  const allTags = useMemo(() => [...new Set(open.flatMap((t) => t.tags || []))].sort(), [open]);
+  const visible = open
+    .filter((t) => !day || (t.due_at && dayKey(new Date(t.due_at)) === dayKey(day)))
+    .filter((t) => !tag || t.tags?.includes(tag));
   const groups = useMemo(() => group(visible), [visible]);
   const busyDays = useMemo(() => new Set(open.filter((t) => t.due_at).map((t) => dayKey(new Date(t.due_at!)))), [open]);
   const todayStart = startOfDay(new Date()).getTime();
@@ -90,6 +94,7 @@ export function Planner() {
       onSnooze={(minutes) => act(`/tasks/${t.id}/snooze`, { minutes }).then(() => toast('好的，稍后再提醒'))}
       onSkip={() => act(`/tasks/${t.id}/skip`)}
       onDelete={() => api(`/tasks/${t.id}`, { method: 'DELETE' }).catch(toastError)}
+      onTag={(name) => setTag(tag === name ? null : name)}
       onOpenMail={t.mail_id ? () => navigate(`/mail?open=${t.mail_id}`) : undefined}
     />
   );
@@ -112,6 +117,15 @@ export function Planner() {
             <button type="button" className="btn ghost sm" onClick={() => setEditing('new')}>详细设置</button>
           </form>
 
+          {tab === 'open' && allTags.length > 0 && (
+            <div className="task-meta" style={{ margin: '-8px 0 6px' }}>
+              {allTags.map((name) => (
+                <button key={name} className={`chip tag${tag === name ? ' on' : ''}`} style={{ border: 0 }} onClick={() => setTag(tag === name ? null : name)}>
+                  <Hash size={11} />{name}
+                </button>
+              ))}
+            </div>
+          )}
           {tab === 'open' ? (
             <>
               {day && (
@@ -164,6 +178,7 @@ function TaskRow(props: {
   onSnooze: (minutes: number) => void;
   onSkip: () => void;
   onDelete: () => void;
+  onTag: (name: string) => void;
   onOpenMail?: () => void;
 }) {
   const t = props.task;
@@ -183,6 +198,9 @@ function TaskRow(props: {
         <div className="task-meta">
           {t.due_at && <span className={`chip${overdue ? ' danger' : ''}`}><AlarmClock size={12} /> {dueLabel(t.due_at)}</span>}
           {t.repeat_rule && <span className="chip"><Repeat size={12} /> {repeatLabel(t.repeat_rule)}</span>}
+          {(t.tags || []).map((name) => (
+            <span key={name} className="chip tag" onClick={(e) => (e.stopPropagation(), props.onTag(name))}><Hash size={11} />{name}</span>
+          ))}
           {snoozed && <span className="chip accent"><BellRing size={12} /> {dueLabel(t.next_remind_at!)} 再提醒</span>}
           {t.mail_subject != null && (
             <span
@@ -264,6 +282,7 @@ function TaskDialog({ task, defaultDay, defaultNag, onClose }: { task: Task | nu
   const [remindBefore, setRemindBefore] = useState(task?.remind_before ?? 0);
   const [nag, setNag] = useState(task?.nag_interval ?? defaultNag);
   const [priority, setPriority] = useState(task?.priority ?? 0);
+  const [tags, setTags] = useState((task?.tags || []).join(' '));
   const [repeat, setRepeat] = useState<RepeatKind>(
     !rule ? 'none' : rule.freq === 'weekly' && rule.weekdays?.join() === '1,2,3,4,5' ? 'weekdays' : rule.freq,
   );
@@ -285,6 +304,7 @@ function TaskDialog({ task, defaultDay, defaultNag, onClose }: { task: Task | nu
       remindBefore,
       nagInterval: nag,
       priority,
+      tags: [...new Set(tags.split(/[\s,，#]+/).filter(Boolean))].slice(0, 10),
       repeat: repeatRule,
     };
     setBusy(true);
@@ -369,6 +389,10 @@ function TaskDialog({ task, defaultDay, defaultNag, onClose }: { task: Task | nu
             ))}
           </div>
         </div>
+        <label className="field">
+          <span>标签（空格分隔）</span>
+          <input className="input" value={tags} onChange={(e) => setTags(e.target.value)} placeholder="工作 家庭" />
+        </label>
         <label className="field">
           <span>备注</span>
           <textarea className="textarea" value={notes} onChange={(e) => setNotes(e.target.value)} maxLength={5000} />

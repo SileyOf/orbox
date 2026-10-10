@@ -4,7 +4,7 @@ import { createContext, useContext, useEffect } from 'react';
 import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { ApiError, api } from './api';
 import type { Account, Task, User } from './api';
-import { applyAppearance, dismissToast, toast, useToasts } from './lib';
+import { applyAppearance, copyText, dismissToast, toast, useToasts } from './lib';
 import { Login } from './pages/Login';
 import { MailPage } from './pages/Mail';
 import { Planner } from './pages/Planner';
@@ -72,6 +72,12 @@ function useServerEvents() {
       } else if (ev.type === 'reminder') {
         toast(`⏰ ${ev.title}`, { ms: 12_000, action: { label: '查看', run: () => navigate('/planner') } });
         desktop('计划提醒', ev.title);
+      } else if (ev.type === 'outbox') {
+        qc.invalidateQueries({ queryKey: ['outbox'] });
+      } else if (ev.type === 'new-mail' && ev.code) {
+        // 验证码邮件：提示里直接给出验证码，一点即复制
+        toast(`🔑 ${ev.code} · ${ev.from}`, { ms: 30_000, action: { label: '复制', run: () => copyText(ev.code) } });
+        desktop(`验证码 ${ev.code}`, `${ev.from} · ${ev.subject}`);
       } else if (ev.type === 'new-mail') {
         toast(`${ev.from}：${ev.subject || '(无主题)'}`, {
           ms: 8000,

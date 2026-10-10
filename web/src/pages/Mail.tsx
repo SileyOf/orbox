@@ -1,18 +1,18 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { InfiniteData } from '@tanstack/react-query';
 import {
-  AlertOctagon, Archive, ArrowLeft, CalendarPlus, File, Folder as FolderIcon, Forward, Inbox, Mail, MailOpen,
+  AlarmClock, AlertOctagon, Archive, ArrowLeft, CalendarPlus, Clock, Copy, File, KeyRound, PenSquare, Folder as FolderIcon, Forward, Inbox, Mail, MailOpen,
   Menu, Paperclip, PenLine, RefreshCw, Reply, ReplyAll, Search, Send, Star, Trash2,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAccounts, useUser } from '../App';
 import { api, folderLabel } from '../api';
-import type { Account, Folder, MessageFull, MessageItem } from '../api';
+import type { Account, Folder, MessageFull, MessageItem, OutboxItem } from '../api';
 import { Compose, loadSavedDraft } from '../components/Compose';
 import type { Draft } from '../components/Compose';
 import { MessageBody, sanitizeMail } from '../components/MessageBody';
-import { escapeHtml, fileSize, fullDate, shortDate, toast, toastError } from '../lib';
+import { copyText, dueLabel, escapeHtml, fileSize, fullDate, shortDate, toast, toastError } from '../lib';
 
 interface Page {
   items: MessageItem[];
@@ -37,6 +37,19 @@ const addrText = (list: { name: string; address: string }[]) => list.map((a) => 
 const withPrefix = (prefix: string, subject: string) =>
   new RegExp(`^${prefix}\\s*[:：]`, 'i').test(subject) ? subject : `${prefix}: ${subject}`;
 
+/** 稍后处理的快捷时间点 */
+function snoozeOptions(): { label: string; at: Date }[] {
+  const now = new Date();
+  const at = (days: number, hour: number) => new Date(now.getFullYear(), now.getMonth(), now.getDate() + days, hour);
+  const toMonday = (8 - now.getDay()) % 7 || 7;
+  return [
+    { label: '3 小时后', at: new Date(now.getTime() + 3 * 3600_000) },
+    ...(now.getHours() < 19 ? [{ label: '今晚 20:00', at: at(0, 20) }] : []),
+    { label: '明早 9:00', at: at(1, 9) },
+    { label: '下周一 9:00', at: at(toMonday, 9) },
+  ];
+}
+
 function signatureHtml(a?: Account): string {
   return a?.signature ? `<br><br><div>-- <br>${escapeHtml(a.signature).replace(/\n/g, '<br>')}</div>` : '';
 }
@@ -57,6 +70,8 @@ export function MailPage() {
   const [compose, setCompose] = useState<Draft | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [drawer, setDrawer] = useState(false);
+  const [snoozeMenu, setSnoozeMenu] = useState(false);
+  const outbox = useQuery({ queryKey: ['outbox'], queryFn: () => api<OutboxItem[]>('/outbox') });
   const [searchText, setSearchText] = useState(params.get('q') || '');
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -82,6 +97,7 @@ export function MailPage() {
   const listKey = { view, folderId, accountId, q };
   const list = useInfiniteQuery({
     queryKey: ['messages', listKey],
+    enabled: view !== 'outbox',
     initialPageParam: '',
     queryFn: ({ pageParam }) => {
       const p = new URLSearchParams({ view });
@@ -98,7 +114,7 @@ export function MailPage() {
   const message = useQuery({
     queryKey: ['message', openId],
     queryFn: () => api<MessageFull>(`/messages/${openId}`),
-    enabled: !!openId,
+    enabled: !!openId && params.get('v') !== 'outbox',
     staleTime: 5 * 60_000,
     retry: false,
   });
@@ -134,6 +150,45 @@ export function MailPage() {
       qc.invalidateQueries({ queryKey: ['messages'] });
     }
   }
+
+  async function snooze(ids: number[], until: Date | null) {
+    setSnoozeMenu(false);
+    if (until) {
+      if (openId && ids.includes(openId)) open(undefined);
+      if (view !== 'snoozed') patchLists((list) => list.filter((m) => !ids.includes(m.id)));
+    }
+    try {
+      await api('/messages/snooze', { body: { ids, until: until?.toISOString() ?? null } });
+      toast(until ? `${dueLabel(until.toISOString())}再提醒你` : '已取消稍后处理');
+    } catch (e) {
+      toastError(e);
+    }
+    qc.invalidateQueries({ queryKey: ['messages'] });
+  }
+
+  /** 从草稿箱继续编辑：正文和收件人填回写信窗口，附件由服务器在发送时从原草稿带上 */
+  function editDraft(m: MessageFull) {
+    setCompose({
+      accountId: m.account_id,
+      to: m.to.map((a) => a.address).join(', '),
+      cc: m.cc.map((a) => a.address).join(', '),
+      bcc: '',
+      subject: m.subject,
+      html: m.body_html
+        ? new DOMParser().parseFromString(sanitizeMail(m.body_html), 'text/html').body.innerHTML
+        : escapeHtml(m.body_text || '').replace(/\n/g, '<br>'),
+      draftOf: m.id,
+      files: [],
+    });
+    open(undefined);
+  }
+
+  useEffect(() => {
+    if (params.get('compose') && accounts.length) {
+      startCompose('new');
+      go({});
+    }
+  }, [accounts.length]);
 
   // 打开即标记已读
   useEffect(() => {
@@ -208,7 +263,7 @@ export function MailPage() {
 
   const folder = folderId ? accounts.flatMap((a) => a.folders).find((f) => f.id === folderId) : undefined;
   const title =
-    view === 'search' ? `搜索"${q}"` : view === 'unread' ? '未读' : view === 'starred' ? '星标' : folder ? folderLabel(folder) : '收件箱';
+    view === 'search' ? `搜索"${q}"` : view === 'unread' ? '未读' : view === 'starred' ? '星标' : view === 'snoozed' ? '稍后处理' : view === 'outbox' ? '定时发送' : folder ? folderLabel(folder) : '收件箱';
   const scope = accountId && view !== 'folder' ? accountOf(accountId)?.name : folder ? accountOf(folder.account_id)?.name : accounts.length > 1 ? '全部邮箱' : '';
   const inboxUnread = accounts.flatMap((a) => a.folders).filter((f) => f.role === 'inbox').reduce((n, f) => n + f.unread, 0);
   const selectedIds = [...selected];
@@ -224,6 +279,10 @@ export function MailPage() {
         <SideItem icon={Inbox} label="全部收件箱" count={inboxUnread} active={view === 'inbox' && !accountId} onClick={() => go({})} />
         <SideItem icon={Mail} label="未读" active={view === 'unread'} onClick={() => go({ v: 'unread' })} />
         <SideItem icon={Star} label="星标" active={view === 'starred'} onClick={() => go({ v: 'starred' })} />
+        <SideItem icon={AlarmClock} label="稍后处理" active={view === 'snoozed'} onClick={() => go({ v: 'snoozed' })} />
+        {(outbox.data?.length || view === 'outbox') ? (
+          <SideItem icon={Clock} label="定时发送" count={outbox.data?.length} active={view === 'outbox'} onClick={() => go({ v: 'outbox' })} />
+        ) : null}
         {accounts.map((a) => (
           <div key={a.id}>
             <div className="side-title">
@@ -299,7 +358,28 @@ export function MailPage() {
             if (el.scrollHeight - el.scrollTop - el.clientHeight < 400 && list.hasNextPage && !list.isFetchingNextPage) list.fetchNextPage();
           }}
         >
-          {items.map((m) => {
+          {view === 'outbox' &&
+            (outbox.data || []).map((o) => (
+              <div key={o.id} className="msg" style={{ cursor: 'default' }}>
+                <span />
+                <div style={{ minWidth: 0 }}>
+                  <div className="msg-top">
+                    <span className="msg-from truncate">收件人：{o.recipients}</span>
+                    <span className="msg-date">{dueLabel(o.send_at)}</span>
+                  </div>
+                  <div className="msg-subject"><span className="truncate grow">{o.subject || '(无主题)'}</span></div>
+                  <div className="row" style={{ marginTop: 6, gap: 6 }}>
+                    <span className={`chip${o.status === 'failed' ? ' danger' : ' accent'}`}>
+                      {o.status === 'failed' ? `发送失败：${o.error}` : o.status === 'sending' ? '发送中…' : `${accountOf(o.account_id)?.name || ''} · 等待发送`}
+                    </span>
+                    <span className="grow" />
+                    <button className="btn sm ghost" onClick={() => api(`/outbox/${o.id}/send`, { method: 'POST' }).then(() => toast('已发送')).catch(toastError)}>立即发送</button>
+                    <button className="btn sm ghost danger" onClick={() => confirm('取消这封定时邮件？内容不会保留。') && api(`/outbox/${o.id}`, { method: 'DELETE' }).catch(toastError)}>取消</button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          {view !== 'outbox' && items.map((m) => {
             const outgoing = m.folder_role === 'sent' || m.folder_role === 'drafts';
             return (
               <div key={m.id} className={`msg${m.seen ? '' : ' unread'}${m.id === openId ? ' active' : ''}`} onClick={() => open(m.id)}>
@@ -328,7 +408,17 @@ export function MailPage() {
                     {m.flagged ? <Star size={13} className="star" /> : null}
                   </div>
                   <div className="msg-snippet truncate">
-                    {view !== 'folder' && view !== 'inbox' && view !== 'unread' && <span className="chip" style={{ height: 18, marginRight: 6 }}>{folderLabel({ role: m.folder_role, name: m.folder_name })}</span>}
+                    {view !== 'folder' && view !== 'inbox' && view !== 'unread' && view !== 'snoozed' && <span className="chip" style={{ height: 18, marginRight: 6 }}>{folderLabel({ role: m.folder_role, name: m.folder_name })}</span>}
+                    {m.code && (
+                      <button
+                        className="code-chip"
+                        title="点击复制验证码"
+                        onClick={(e) => (e.stopPropagation(), copyText(m.code!))}
+                      >
+                        <KeyRound size={11} /> {m.code}
+                      </button>
+                    )}
+                    {m.snoozed_until && <span className="chip accent" style={{ height: 18, marginRight: 6 }}>{dueLabel(m.snoozed_until)}</span>}
                     {m.snippet || ' '}
                   </div>
                 </div>
@@ -336,7 +426,8 @@ export function MailPage() {
             );
           })}
           {list.isFetchingNextPage && <div className="muted small" style={{ padding: 16, textAlign: 'center' }}>加载中…</div>}
-          {!list.isLoading && !items.length && (
+          {view === 'outbox' && !outbox.data?.length && <div className="empty"><Clock size={40} />没有等待发送的邮件</div>}
+          {view !== 'outbox' && !list.isLoading && !items.length && (
             <div className="empty">
               <Inbox size={40} />
               {view === 'search' ? '没有找到匹配的邮件' : accounts.length || accountsLoading ? '这里空空如也' : '添加邮箱后邮件会出现在这里'}
@@ -355,6 +446,20 @@ export function MailPage() {
               <button className="icon-btn" title="回复全部 (a)" onClick={() => startCompose('replyAll', current)}><ReplyAll size={18} /></button>
               <button className="icon-btn" title="转发 (f)" onClick={() => startCompose('forward', current)}><Forward size={18} /></button>
               <span className="grow" />
+              {current.folder_role === 'drafts' && (
+                <button className="btn sm accent" onClick={() => editDraft(current)}><PenSquare size={15} /> 继续编辑</button>
+              )}
+              <div className="menu" onMouseLeave={() => setSnoozeMenu(false)}>
+                <button className={`icon-btn${current.snoozed_until ? ' on' : ''}`} title="稍后处理" onClick={() => setSnoozeMenu(!snoozeMenu)}><AlarmClock size={18} /></button>
+                {snoozeMenu && (
+                  <div className="card menu-pop">
+                    {snoozeOptions().map((o) => (
+                      <button key={o.label} onClick={() => snooze([current.id], o.at)}>{o.label}</button>
+                    ))}
+                    {current.snoozed_until && <button onClick={() => snooze([current.id], null)}>取消稍后处理</button>}
+                  </div>
+                )}
+              </div>
               <button className="icon-btn" title="转为待办" onClick={() => toTask(current)}><CalendarPlus size={18} /></button>
               <button className={`icon-btn${current.flagged ? ' on' : ''}`} title="星标 (s)" onClick={() => setFlag([current.id], { flagged: !current.flagged })}>
                 <Star size={18} className={current.flagged ? 'star' : ''} />
@@ -387,6 +492,15 @@ export function MailPage() {
                     </div>
                   </div>
                 </div>
+                {current.code && (
+                  <button className="code-banner" onClick={() => copyText(current.code!)} title="点击复制">
+                    <KeyRound size={18} />
+                    <span className="muted">验证码</span>
+                    <b>{current.code}</b>
+                    <span className="grow" />
+                    <Copy size={15} /> 复制
+                  </button>
+                )}
                 <MessageBody key={`${current.id}-${user.settings.theme}`} message={current} blockRemote={user.settings.blockRemoteImages} />
                 {current.attachments.length > 0 && (
                   <div className="atts">

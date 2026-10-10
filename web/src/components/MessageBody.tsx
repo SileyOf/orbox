@@ -22,6 +22,39 @@ export const sanitizeMail = (html: string) =>
  * HTML 邮件放进不允许脚本的沙箱 iframe，并用 CSP 掐掉一切外部请求；
  * 远程图片只有用户点了"显示"才放行，避免追踪像素暴露已读状态。
  */
+const QUOTE_SELECTOR = '.gmail_quote, .yahoo_quoted, .moz-cite-prefix, #divRplyFwdMsg, #appendonsend, blockquote';
+
+/**
+ * 把回复里层层嵌套的历史引用从正文里拆出去，默认只显示对方这次新写的内容。
+ * 引用块以及它后面的同级内容都算引用；前面没有任何正文（纯转发）时不拆。
+ */
+function stripQuoteHtml(safeHtml: string): string | null {
+  const doc = new DOMParser().parseFromString(safeHtml, 'text/html');
+  const quote = doc.body.querySelector(QUOTE_SELECTOR);
+  if (!quote || (quote.textContent || '').trim().length < 60) return null;
+  let node: Element | null = quote;
+  // 引用块可能包在几层 div 里，沿着父级把每一层后面的兄弟节点都去掉
+  while (node && node !== doc.body) {
+    while (node.nextSibling) node.nextSibling.remove();
+    const parent: Element | null = node.parentElement;
+    if (node === quote) node.remove();
+    node = parent;
+  }
+  if (!(doc.body.textContent || '').trim()) return null;
+  return doc.documentElement.outerHTML;
+}
+
+/** 纯文本邮件：结尾连续的 ">" 引用行（连同上面那句"某某写道："）视为引用 */
+function splitQuoteText(text: string): { main: string; quote: string } | null {
+  const lines = text.split('\n');
+  let start = lines.length;
+  while (start > 0 && /^\s*(>|$)/.test(lines[start - 1])) start--;
+  if (!lines.slice(start).some((l) => /^\s*>/.test(l))) return null;
+  if (start > 0 && /(wrote|写道|寫道|написал)\s*[:：]\s*$/i.test(lines[start - 1])) start--;
+  const main = lines.slice(0, start).join('\n').trimEnd();
+  return main ? { main, quote: lines.slice(start).join('\n') } : null;
+}
+
 function HtmlBody({ html, allowRemote }: { html: string; allowRemote: boolean }) {
   const ref = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(200);
@@ -42,7 +75,7 @@ function HtmlBody({ html, allowRemote }: { html: string; allowRemote: boolean })
       blockquote { margin: 8px 0; padding-left: 12px; border-left: 3px solid ${themed ? v('--line') : '#ddd'}; }
       pre { white-space: pre-wrap; }`;
     const head = `<meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><base target="_blank"><style>${base}</style>`;
-    return `<!doctype html>${sanitizeMail(html).replace('<head>', `<head>${head}`)}`;
+    return `<!doctype html>${html.replace('<head>', `<head>${head}`)}`;
   }, [html, allowRemote]);
 
   useEffect(() => {
@@ -97,9 +130,14 @@ function TextBody({ text }: { text: string }) {
 
 export function MessageBody({ message, blockRemote }: { message: MessageFull; blockRemote: boolean }) {
   const [allowRemote, setAllowRemote] = useState(!blockRemote);
+  const [showQuote, setShowQuote] = useState(false);
   useEffect(() => setAllowRemote(!blockRemote), [message.id, blockRemote]);
   const html = message.body_html;
   const hasRemote = !!html && REMOTE.test(html);
+  const safe = useMemo(() => (html ? sanitizeMail(html) : null), [html]);
+  const trimmedHtml = useMemo(() => (safe ? stripQuoteHtml(safe) : null), [safe]);
+  const textParts = useMemo(() => (html ? null : splitQuoteText(message.body_text || '')), [html, message.body_text]);
+  const hasQuote = !!(trimmedHtml || textParts);
 
   if (message.bodyError) return <div className="banner">正文加载失败：{message.bodyError}</div>;
   return (
@@ -114,7 +152,16 @@ export function MessageBody({ message, blockRemote }: { message: MessageFull; bl
         </div>
       )}
       <div className="reader-body">
-        {html ? <HtmlBody html={html} allowRemote={allowRemote} /> : <TextBody text={message.body_text || '(无正文)'} />}
+        {safe ? (
+          <HtmlBody html={showQuote || !trimmedHtml ? safe : trimmedHtml} allowRemote={allowRemote} />
+        ) : (
+          <TextBody text={(showQuote || !textParts ? message.body_text : textParts.main) || '(无正文)'} />
+        )}
+        {hasQuote && (
+          <button className="quote-toggle" onClick={() => setShowQuote(!showQuote)} title={showQuote ? '收起引用内容' : '显示引用内容'}>
+            {showQuote ? '收起引用内容' : '··· 显示引用内容'}
+          </button>
+        )}
       </div>
     </>
   );

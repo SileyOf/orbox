@@ -1,11 +1,12 @@
 import { ImapFlow } from 'imapflow';
-import type { FetchMessageObject, MessageAddressObject } from 'imapflow';
+import type { FetchMessageObject, MessageAddressObject, MessageStructureObject } from 'imapflow';
 import nodemailer from 'nodemailer';
 import { decrypt } from '../crypto.js';
 import { exec, one, query } from '../db.js';
 import { emit } from '../events.js';
 import { forgetAccessToken, getAccessToken } from './oauth.js';
-import { parseSource, structureHasAttachments } from './parse.js';
+import { extractCode } from './code.js';
+import { htmlToPlain, makeSnippet, parseSource, structureHasAttachments } from './parse.js';
 import type { ParsedBody } from './parse.js';
 
 export interface AccountRow {
@@ -60,6 +61,20 @@ const SYNC_INTERVAL = 5 * 60_000;
 const ENVELOPE_CHUNK = 200;
 const PREFETCH_PER_SYNC = 30;
 const MAX_NOTIFY_PER_SYNC = 8;
+/** 快速通道只取正文开头这么多字节，足够生成摘要和提取验证码 */
+const PEEK_BYTES = 128 * 1024;
+
+const ENVELOPE_COLUMNS = `user_id, account_id, folder_id, uid, message_id, in_reply_to, subject, from_name, from_addr,
+  to_json, cc_json, reply_to, date, size, seen, flagged, answered, has_attachments, notified`;
+
+const recountFolder = (folderId: number) =>
+  exec(
+    `UPDATE folders f SET
+       total = (SELECT COUNT(*) FROM messages WHERE folder_id = f.id),
+       unread = (SELECT COUNT(*) FROM messages WHERE folder_id = f.id AND seen = 0)
+     WHERE id = ?`,
+    [folderId],
+  );
 
 const ROLES: Record<string, string> = {
   '\\Inbox': 'inbox',
@@ -77,8 +92,9 @@ export const setNewMailHandler = (fn: NewMailHandler) => void (onNewMail = fn);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const errMsg = (e: any) => String(e?.responseText || e?.message || e).slice(0, 500);
 
-function imapClient(p: ConnParams): ImapFlow {
+function imapClient(p: ConnParams, autoIdleDelay?: number): ImapFlow {
   const client = new ImapFlow({
+    autoIdleDelay,
     host: p.imap_host,
     port: p.imap_port,
     secure: !!p.imap_secure,
@@ -139,6 +155,24 @@ function toDate(...candidates: (Date | string | undefined)[]): Date {
   return new Date();
 }
 
+/** 在 BODYSTRUCTURE 里找正文部分（优先纯文本），跳过附件 */
+function findTextPart(node: MessageStructureObject | undefined, want: string): string | null {
+  if (!node) return null;
+  if (node.disposition?.toLowerCase() === 'attachment') return null;
+  if (node.type === want) return node.part || '1';
+  for (const child of node.childNodes || []) {
+    const hit = findTextPart(child, want);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+async function readAll(stream: NodeJS.ReadableStream): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks);
+}
+
 class AccountWorker {
   private stopped = false;
   private idle?: ImapFlow;
@@ -147,6 +181,8 @@ class AccountWorker {
   private queue: Promise<unknown> = Promise.resolve();
   private timer?: NodeJS.Timeout;
   private inboxKick?: NodeJS.Timeout;
+  private fastBusy = false;
+  private fastAgain = false;
 
   constructor(public account: AccountRow) {}
 
@@ -213,7 +249,9 @@ class AccountWorker {
       let c: ImapFlow | undefined;
       try {
         // 取令牌也可能失败（授权失效、网络不通），和连接失败一样走退避重试
-        const client = (c = this.idle = imapClient(await connParams(this.account)));
+        // 这条连接上偶尔也会发命令（见 fastInbox），命令结束后要尽快回到 IDLE，
+        // 库默认要等 15 秒，期间到达的邮件不会被感知
+        const client = (c = this.idle = imapClient(await connParams(this.account), 500));
         const closed = new Promise<void>((res) => client.once('close', () => res()));
         await c.connect();
         await c.mailboxOpen('INBOX');
@@ -222,7 +260,7 @@ class AccountWorker {
           clearTimeout(this.inboxKick);
           this.inboxKick = setTimeout(() => this.enqueue(() => this.syncInbox()), 400);
         };
-        c.on('exists', kick);
+        c.on('exists', () => void this.fastInbox(client, kick));
         c.on('flags', kick);
         c.on('expunge', kick);
         await this.requestSync();
@@ -236,6 +274,87 @@ class AccountWorker {
       if (this.stopped) break;
       await sleep(backoff);
       backoff = Math.min(backoff * 2, 10 * 60_000);
+    }
+  }
+
+  /**
+   * 新邮件快速通道：不排同步队列，直接在 IDLE 连接上取新邮件的信封和正文开头，
+   * 入库后立刻通知。完整对账和正文缓存随后由常规同步补上。
+   */
+  private async fastInbox(c: ImapFlow, thenSync: () => void) {
+    if (this.fastBusy) {
+      this.fastAgain = true;
+      return;
+    }
+    this.fastBusy = true;
+    const { id: accountId, user_id: userId } = this.account;
+    try {
+      do {
+        this.fastAgain = false;
+        const inbox = await one<FolderRow & { max_uid: number | null }>(
+          `SELECT f.*, (SELECT MAX(uid) FROM messages WHERE folder_id = f.id) AS max_uid
+           FROM folders f WHERE f.account_id = ? AND f.role = 'inbox'`,
+          [accountId],
+        );
+        // 首次全量同步还没完成时交给常规同步，避免把历史邮件当成新邮件
+        if (!inbox || inbox.uid_validity == null) break;
+        const last = Math.max(inbox.last_uid, inbox.max_uid || 0);
+        const fresh = (
+          await c.fetchAll(
+            `${last + 1}:*`,
+            { uid: true, flags: true, envelope: true, bodyStructure: true, size: true, internalDate: true },
+            { uid: true },
+          )
+        ).filter((m) => m.uid > last);
+        if (!fresh.length) continue;
+        await exec(`INSERT IGNORE INTO messages (${ENVELOPE_COLUMNS}) VALUES ?`, [
+          fresh.map((m) => this.envelopeRow(inbox.id, m, m.flags?.has('\\Seen') ? 1 : 0)),
+        ]);
+        await exec('UPDATE folders SET last_uid = GREATEST(last_uid, ?) WHERE id = ?', [
+          Math.max(...fresh.map((m) => m.uid)),
+          inbox.id,
+        ]);
+        for (const m of fresh.slice(-MAX_NOTIFY_PER_SYNC)) {
+          if (m.flags?.has('\\Seen')) continue;
+          const row = await one<{ id: number }>('SELECT id FROM messages WHERE folder_id = ? AND uid = ?', [inbox.id, m.uid]);
+          if (!row) continue;
+          const text = await this.peekText(c, m).catch(() => '');
+          if (text) {
+            await exec('UPDATE messages SET snippet = ?, code = ? WHERE id = ? AND body_fetched = 0', [
+              makeSnippet(text),
+              extractCode(m.envelope?.subject || '', text),
+              row.id,
+            ]);
+          }
+          await this.announce(row.id);
+        }
+        await recountFolder(inbox.id);
+        emit(userId, { type: 'mail', accountId, folderId: inbox.id });
+      } while (this.fastAgain && !this.stopped);
+    } catch (e) {
+      console.error(`[fast ${this.account.email}]`, errMsg(e));
+    } finally {
+      this.fastBusy = false;
+      thenSync();
+    }
+  }
+
+  /** 只下载正文部分的开头并转成纯文本 */
+  private async peekText(c: ImapFlow, m: FetchMessageObject): Promise<string> {
+    const plain = findTextPart(m.bodyStructure, 'text/plain');
+    const part = plain || findTextPart(m.bodyStructure, 'text/html');
+    if (!part) return '';
+    const dl = await c.download(String(m.uid), part, { uid: true, maxBytes: PEEK_BYTES });
+    if (!dl.content) return '';
+    const text = (await readAll(dl.content)).toString('utf8');
+    return plain ? text : htmlToPlain(text);
+  }
+
+  /** 用带条件的更新认领通知权，快速通道和常规同步谁先到谁发，保证每封只通知一次 */
+  private async announce(messageId: number) {
+    const claimed = await exec('UPDATE messages SET notified = 1 WHERE id = ? AND notified = 0', [messageId]);
+    if (claimed.affectedRows) {
+      await onNewMail(this.account, messageId).catch((e) => console.error('[notify]', errMsg(e)));
     }
   }
 
@@ -347,13 +466,12 @@ class AccountWorker {
           ),
         );
         if (fetched.length) {
-          await exec(
-            `INSERT IGNORE INTO messages
-               (user_id, account_id, folder_id, uid, message_id, in_reply_to, subject, from_name, from_addr,
-                to_json, cc_json, reply_to, date, size, seen, flagged, answered, has_attachments)
-             VALUES ?`,
-            [fetched.map((m) => this.envelopeRow(folder.id, m))],
-          );
+          // 只有非首次同步时收件箱里新出现的未读邮件才需要通知
+          const pending = (m: FetchMessageObject) =>
+            !initial && folder.role === 'inbox' && !m.flags?.has('\\Seen') ? 0 : 1;
+          await exec(`INSERT IGNORE INTO messages (${ENVELOPE_COLUMNS}) VALUES ?`, [
+            fetched.map((m) => this.envelopeRow(folder.id, m, pending(m))),
+          ]);
         }
         // 大邮箱首次同步时让列表边同步边出现
         if (missing.length > ENVELOPE_CHUNK) emit(userId, { type: 'mail', accountId, folderId: folder.id });
@@ -371,16 +489,17 @@ class AccountWorker {
       );
       emit(userId, { type: 'mail', accountId, folderId: folder.id });
 
-      // 只有非首次同步、收件箱里真正新到的未读邮件才通知
-      if (!initial && folder.role === 'inbox') {
+      if (folder.role === 'inbox') {
         const fresh = await query<{ id: number }>(
-          'SELECT id FROM messages WHERE folder_id = ? AND uid > ? AND seen = 0 ORDER BY uid LIMIT ?',
-          [folder.id, folder.last_uid, MAX_NOTIFY_PER_SYNC],
+          'SELECT id FROM messages WHERE folder_id = ? AND notified = 0 ORDER BY uid DESC LIMIT ?',
+          [folder.id, MAX_NOTIFY_PER_SYNC],
         );
-        for (const { id } of fresh) {
+        for (const { id } of fresh.reverse()) {
           await this.loadBody(id).catch(() => {});
-          await onNewMail(this.account, id).catch((e) => console.error('[notify]', errMsg(e)));
+          await this.announce(id);
         }
+        // 一次涌入太多（比如停机很久之后）时只通知最新的几封，其余不再补发
+        await exec('UPDATE messages SET notified = 1 WHERE folder_id = ? AND notified = 0', [folder.id]);
       }
     }
 
@@ -396,7 +515,7 @@ class AccountWorker {
     if (pending.length) emit(userId, { type: 'mail', accountId, folderId: folder.id });
   }
 
-  private envelopeRow(folderId: number, m: FetchMessageObject) {
+  private envelopeRow(folderId: number, m: FetchMessageObject, notified: number) {
     const env = m.envelope || {};
     const from = env.from?.[0];
     const flags = m.flags || new Set<string>();
@@ -419,6 +538,7 @@ class AccountWorker {
       +flags.has('\\Flagged'),
       +flags.has('\\Answered'),
       +structureHasAttachments(m.bodyStructure),
+      notified,
     ];
   }
 
@@ -442,13 +562,15 @@ class AccountWorker {
   /** 下载并解析正文，写入本地缓存 */
   async loadBody(messageId: number): Promise<void> {
     const body = await this.fetchSource(messageId);
+    const meta = await one<{ subject: string }>('SELECT subject FROM messages WHERE id = ?', [messageId]);
     await exec(
-      `UPDATE messages SET body_fetched = 1, body_text = ?, body_html = ?, snippet = ?, attachments = ?,
+      `UPDATE messages SET body_fetched = 1, body_text = ?, body_html = ?, snippet = ?, code = ?, attachments = ?,
          has_attachments = ? WHERE id = ?`,
       [
         body.text,
         body.html,
         body.snippet,
+        extractCode(meta?.subject || '', body.text),
         JSON.stringify(body.attachments),
         +body.attachments.some((a) => !a.inline),
         messageId,
@@ -473,12 +595,14 @@ class AccountWorker {
     await this.withFolder(folderPath, (c) => c.messageDelete(uids.join(','), { uid: true }));
   }
 
-  async appendSent(raw: Buffer) {
-    const sent = (await this.folders()).find((f) => f.role === 'sent');
-    if (!sent) return;
+  /** 把一封完整的邮件存进指定角色的文件夹（已发送 / 草稿） */
+  async appendTo(role: 'sent' | 'drafts', raw: Buffer) {
+    const folder = (await this.folders()).find((f) => f.role === role);
+    if (!folder) return false;
     const c = await this.client();
-    await c.append(sent.path, raw, ['\\Seen']);
-    void this.enqueue(() => this.syncFolder(sent));
+    await c.append(folder.path, raw, role === 'drafts' ? ['\\Seen', '\\Draft'] : ['\\Seen']);
+    void this.enqueue(() => this.syncFolder(folder));
+    return true;
   }
 }
 

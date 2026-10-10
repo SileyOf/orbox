@@ -11,13 +11,12 @@ import { config } from './config.js';
 import { pool } from './db.js';
 import { setNewMailHandler, startAllAccounts, stopAllAccounts } from './mail/manager.js';
 import { migrate } from './migrate.js';
-import { notifyNewMail, startTelegram, stopTelegram } from './notify/telegram.js';
+import { dispatchNewMail } from './notify/dispatch.js';
+import { startTelegram, stopTelegram } from './notify/telegram.js';
 import { accountRoutes } from './routes/accounts.js';
 import { mailRoutes } from './routes/mail.js';
 import { taskRoutes } from './routes/tasks.js';
 import { startScheduler } from './tasks/scheduler.js';
-import { emit } from './events.js';
-import { one } from './db.js';
 
 const app = Fastify({ logger: { level: 'warn' }, bodyLimit: 10 * 1024 * 1024, trustProxy: true, forceCloseConnections: true });
 
@@ -69,11 +68,7 @@ for (;;) {
 }
 await migrate();
 void startTelegram();
-setNewMailHandler(async (account, messageId) => {
-  const m = await one('SELECT id, subject, from_name, from_addr FROM messages WHERE id = ?', [messageId]);
-  if (m) emit(account.user_id, { type: 'new-mail', id: m.id, from: m.from_name || m.from_addr, subject: m.subject });
-  await notifyNewMail(account, messageId);
-});
+setNewMailHandler(dispatchNewMail);
 await startAllAccounts();
 const stopScheduler = startScheduler();
 

@@ -22,6 +22,7 @@ export interface TaskRow {
   remind_before: number;
   repeat_rule: RepeatRule | null;
   priority: number;
+  tags: string[] | null;
   status: 'open' | 'done';
   completed_at: Date | null;
   next_remind_at: Date | null;
@@ -40,6 +41,7 @@ export interface TaskInput {
   remindBefore?: number;
   repeat?: RepeatRule | null;
   priority?: number;
+  tags?: string[];
   nagInterval?: number;
   mailRef?: string | null;
   mailSubject?: string | null;
@@ -90,8 +92,8 @@ export const getTask = (userId: number, id: number) =>
 export async function createTask(userId: number, tz: string, input: TaskInput): Promise<TaskRow> {
   const remindBefore = input.remindBefore ?? 0;
   const res = await exec(
-    `INSERT INTO tasks (user_id, title, notes, due_at, remind_before, repeat_rule, priority, next_remind_at,
-       nag_interval, mail_ref, mail_subject, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO tasks (user_id, title, notes, due_at, remind_before, repeat_rule, priority, tags, next_remind_at,
+       nag_interval, mail_ref, mail_subject, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       userId,
       input.title,
@@ -100,6 +102,7 @@ export async function createTask(userId: number, tz: string, input: TaskInput): 
       remindBefore,
       normalizeRule(input.repeat, input.dueAt, tz),
       input.priority ?? 0,
+      JSON.stringify(input.tags ?? []),
       remindAt(input.dueAt, remindBefore),
       input.nagInterval ?? 0,
       input.mailRef || null,
@@ -120,7 +123,7 @@ export async function updateTask(userId: number, tz: string, id: number, patch: 
   const timingChanged =
     (dueAt?.getTime() ?? null) !== (task.due_at?.getTime() ?? null) || remindBefore !== task.remind_before;
   await exec(
-    `UPDATE tasks SET title = ?, notes = ?, due_at = ?, remind_before = ?, repeat_rule = ?, priority = ?,
+    `UPDATE tasks SET title = ?, notes = ?, due_at = ?, remind_before = ?, repeat_rule = ?, priority = ?, tags = ?,
        nag_interval = ?, next_remind_at = ?, nag_count = ? WHERE id = ?`,
     [
       patch.title ?? task.title,
@@ -129,6 +132,7 @@ export async function updateTask(userId: number, tz: string, id: number, patch: 
       remindBefore,
       normalizeRule(repeat, dueAt, tz),
       patch.priority ?? task.priority,
+      JSON.stringify(patch.tags ?? task.tags ?? []),
       patch.nagInterval ?? task.nag_interval,
       timingChanged ? remindAt(dueAt, remindBefore) : task.next_remind_at,
       timingChanged ? 0 : task.nag_count,

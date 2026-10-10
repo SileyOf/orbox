@@ -96,6 +96,15 @@ export function toast(text: string, opts: { kind?: Toast['kind']; action?: Toast
   return id;
 }
 
+export async function copyText(text: string, label = '已复制') {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(`${label} ${text}`, { ms: 2000 });
+  } catch {
+    toast('浏览器不允许访问剪贴板，请手动复制', { kind: 'error' });
+  }
+}
+
 export const toastError = (e: unknown) => toast(e instanceof Error ? e.message : String(e), { kind: 'error', ms: 6000 });
 
 export const useToasts = () =>

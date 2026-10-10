@@ -1,17 +1,17 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { requireUser } from '../auth.js';
 import { exec, one, query } from '../db.js';
 import { emit, subscribe } from '../events.js';
 import { worker } from '../mail/manager.js';
-import { sendMail } from '../mail/send.js';
+import { flushOutbox, saveDraft, scheduleMail, sendMail } from '../mail/send.js';
 import type { AttachmentMeta } from '../mail/parse.js';
 
 const LIST_COLUMNS = `m.id, m.account_id, m.folder_id, m.subject, m.from_name, m.from_addr, m.to_json AS \`to\`,
-  m.date, m.seen, m.flagged, m.answered, m.has_attachments, m.snippet, f.role AS folder_role, f.name AS folder_name`;
+  m.date, m.seen, m.flagged, m.answered, m.has_attachments, m.snippet, m.code, m.snoozed_until, f.role AS folder_role, f.name AS folder_name`;
 
 const listQuery = z.object({
-  view: z.enum(['inbox', 'unread', 'starred', 'folder', 'search']).default('inbox'),
+  view: z.enum(['inbox', 'unread', 'starred', 'snoozed', 'folder', 'search']).default('inbox'),
   folderId: z.coerce.number().int().optional(),
   accountId: z.coerce.number().int().optional(),
   q: z.string().trim().max(200).optional(),
@@ -139,8 +139,11 @@ export async function mailRoutes(app: FastifyInstance) {
       where.push(`(f.role IS NULL OR f.role NOT IN ('trash', 'junk'))`);
     } else if (p.view === 'starred') {
       where.push('m.flagged = 1');
+    } else if (p.view === 'snoozed') {
+      where.push('m.snoozed_until IS NOT NULL');
     } else {
-      where.push(`f.role = 'inbox'`);
+      // 稍后处理的邮件在到点之前不出现在收件箱里
+      where.push(`f.role = 'inbox' AND m.snoozed_until IS NULL`);
       if (p.view === 'unread') where.push('m.seen = 0');
     }
     if (p.accountId) {
@@ -171,7 +174,7 @@ export async function mailRoutes(app: FastifyInstance) {
       one(
         `SELECT m.id, m.account_id, m.folder_id, m.message_id, m.subject, m.from_name, m.from_addr,
                 m.to_json AS \`to\`, m.cc_json AS cc, m.reply_to, m.date, m.size, m.seen, m.flagged, m.answered,
-                m.body_fetched, m.body_text, m.body_html, m.attachments, f.role AS folder_role, f.name AS folder_name
+                m.code, m.snoozed_until, m.body_fetched, m.body_text, m.body_html, m.attachments, f.role AS folder_role, f.name AS folder_name
          FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.id = ? AND m.user_id = ?`,
         [req.params.id, req.user.id],
       );
@@ -236,7 +239,15 @@ export async function mailRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
-  app.post('/api/send', async (req, reply) => {
+  app.post('/api/messages/snooze', async (req) => {
+    const body = z.object({ ids, until: z.coerce.date().nullable() }).parse(req.body);
+    await exec('UPDATE messages SET snoozed_until = ? WHERE user_id = ? AND id IN (?)', [body.until, req.user.id, body.ids]);
+    emit(req.user.id, { type: 'mail', accountId: 0 });
+    return { ok: true };
+  });
+
+  /** 发信、定时发送、存草稿共用同一种 multipart 请求体 */
+  async function readCompose(req: FastifyRequest) {
     let payload: unknown;
     const files: { filename: string; content: Buffer; contentType: string }[] = [];
     for await (const part of req.parts()) {
@@ -258,16 +269,66 @@ export async function mailRoutes(app: FastifyInstance) {
         text: z.string().max(5_000_000).default(''),
         replyTo: z.number().int().optional(),
         forwardOf: z.number().int().optional(),
+        draftOf: z.number().int().optional(),
+        sendAt: z.coerce.date().optional(),
       })
       .parse(payload);
+    return { input, files };
+  }
+
+  app.post('/api/send', async (req, reply) => {
+    const { input, files } = await readCompose(req);
     if (!input.to.length && !input.cc.length && !input.bcc.length) {
       return reply.code(400).send({ error: '请填写收件人' });
     }
     try {
+      if (input.sendAt && input.sendAt.getTime() > Date.now() + 30_000) {
+        // 整封邮件要存进数据库，给定时邮件单独设一个保守的大小上限
+        if (files.reduce((n, f) => n + f.content.length, 0) > 20 * 1024 * 1024) {
+          return reply.code(400).send({ error: '定时发送的附件总大小不能超过 20MB' });
+        }
+        await scheduleMail(req.user, input, files, input.sendAt);
+        return { ok: true, scheduled: true };
+      }
       await sendMail(req.user, input, files);
     } catch (e: any) {
       return reply.code(502).send({ error: `发送失败：${e.responseText || e.message}` });
     }
     return { ok: true };
+  });
+
+  app.post('/api/drafts', async (req, reply) => {
+    const { input, files } = await readCompose(req);
+    try {
+      await saveDraft(req.user, input, files);
+    } catch (e: any) {
+      return reply.code(502).send({ error: `保存草稿失败：${e.responseText || e.message}` });
+    }
+    return { ok: true };
+  });
+
+  app.get('/api/outbox', (req) =>
+    query(
+      `SELECT id, account_id, send_at, subject, recipients, status, error FROM outbox
+       WHERE user_id = ? ORDER BY send_at`,
+      [req.user.id],
+    ),
+  );
+
+  app.delete<{ Params: { id: string } }>('/api/outbox/:id', async (req, reply) => {
+    const res = await exec(`DELETE FROM outbox WHERE id = ? AND user_id = ? AND status <> 'sending'`, [
+      req.params.id,
+      req.user.id,
+    ]);
+    emit(req.user.id, { type: 'outbox' });
+    return res.affectedRows ? { ok: true } : reply.code(404).send({ error: '这封邮件已经发出或不存在' });
+  });
+
+  app.post<{ Params: { id: string } }>('/api/outbox/:id/send', async (req, reply) => {
+    const row = await one<{ id: number }>('SELECT id FROM outbox WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+    if (!row) return reply.code(404).send({ error: '这封邮件已经发出或不存在' });
+    await flushOutbox(row.id);
+    const left = await one<{ error: string | null }>('SELECT error FROM outbox WHERE id = ?', [row.id]);
+    return left ? reply.code(502).send({ error: `发送失败：${left.error}` }) : { ok: true };
   });
 }

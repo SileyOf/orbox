@@ -16,6 +16,14 @@ export interface UserSettings {
   digestTime: string; // "HH:mm"，空字符串表示不发早报
   nagInterval: number; // 默认重复提醒间隔（分钟），0 表示只提醒一次
   blockRemoteImages: boolean;
+  /** 始终通知的发件人（地址或域名），不受免打扰限制 */
+  vipSenders: string[];
+  /** 从不通知的发件人（地址或域名） */
+  mutedSenders: string[];
+  /** 带验证码的邮件无视免打扰 */
+  codeAlways: boolean;
+  /** Telegram 之外的推送通道地址，空字符串表示未启用 */
+  channels: { bark: string; ntfy: string; webhook: string };
 }
 
 export const defaultSettings: UserSettings = {
@@ -27,6 +35,10 @@ export const defaultSettings: UserSettings = {
   digestTime: '08:30',
   nagInterval: 15,
   blockRemoteImages: true,
+  vipSenders: [],
+  mutedSenders: [],
+  codeAlways: true,
+  channels: { bark: '', ntfy: '', webhook: '' },
 };
 
 export interface User {
@@ -51,7 +63,11 @@ function toUser(row: any): User {
     name: row.name,
     isAdmin: !!row.is_admin,
     timezone: row.timezone,
-    settings: { ...defaultSettings, ...(row.settings || {}) },
+    settings: {
+      ...defaultSettings,
+      ...(row.settings || {}),
+      channels: { ...defaultSettings.channels, ...(row.settings?.channels || {}) },
+    },
   };
 }
 
@@ -102,6 +118,9 @@ const credentials = z.object({
 const TIMEZONES = new Set(Intl.supportedValuesOf('timeZone').concat('UTC'));
 const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 
+const senderList = z.array(z.string().trim().min(3).max(190)).max(200);
+const channelUrl = z.string().trim().max(500).refine((v) => v === '' || /^https?:\/\//i.test(v), '通道地址必须以 http:// 或 https:// 开头');
+
 const profilePatch = z.object({
   name: z.string().trim().max(100).optional(),
   timezone: z.string().refine((tz) => TIMEZONES.has(tz), '未知时区').optional(),
@@ -115,6 +134,10 @@ const profilePatch = z.object({
       digestTime: hhmm.or(z.literal('')),
       nagInterval: z.number().int().min(0).max(1440),
       blockRemoteImages: z.boolean(),
+      vipSenders: senderList,
+      mutedSenders: senderList,
+      codeAlways: z.boolean(),
+      channels: z.object({ bark: channelUrl, ntfy: channelUrl, webhook: channelUrl }).partial(),
     })
     .partial()
     .optional(),
@@ -177,7 +200,11 @@ export async function authRoutes(app: FastifyInstance) {
     await exec('UPDATE users SET name = ?, timezone = ?, settings = ? WHERE id = ?', [
       body.name ?? user.name,
       body.timezone ?? user.timezone,
-      JSON.stringify({ ...user.settings, ...body.settings }),
+      JSON.stringify({
+        ...user.settings,
+        ...body.settings,
+        channels: { ...user.settings.channels, ...body.settings?.channels },
+      }),
       user.id,
     ]);
     return getUser(user.id);
