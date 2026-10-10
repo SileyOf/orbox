@@ -1,0 +1,13 @@
+{
+  "name": "orbox",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["server", "web"],
+  "scripts": {
+    "dev": "npm run dev -w server & npm run dev -w web & wait",
+    "build": "npm run build -w web && npm run build -w server",
+    "start": "npm run start -w server",
+    "migrate": "npm run migrate -w server",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web"
+  }
+}

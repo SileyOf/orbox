@@ -1,0 +1,12 @@
+# 数据库由你自行部署，这里只有应用本身。配置写在同目录的 .env（参考 .env.example）。
+services:
+  orbox:
+    build: .
+    image: orbox:latest
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8787:8787"
+    # 数据库和 Orbox 在同一台机器时，DB_HOST 填 host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
