@@ -51,6 +51,18 @@ h1, h2, h3 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 ::selection { background: var(--accent); color: var(--on-accent); }
 :focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
 
+/* 滚动条：细、圆角、平时很淡，悬停所在区域时加深 */
+* { scrollbar-width: thin; scrollbar-color: color-mix(in oklab, var(--ink) 18%, transparent) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  border-radius: 99px; border: 3px solid transparent; background-clip: content-box;
+  background-color: color-mix(in oklab, var(--ink) 14%, transparent);
+}
+*:hover::-webkit-scrollbar-thumb { background-color: color-mix(in oklab, var(--ink) 26%, transparent); }
+*::-webkit-scrollbar-thumb:hover { background-color: color-mix(in oklab, var(--ink) 42%, transparent); }
+*::-webkit-scrollbar-corner { background: transparent; }
+
 /* ---------- 基础控件 ---------- */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
@@ -138,7 +150,8 @@ h1, h2, h3 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---------- 应用骨架 ---------- */
-.app { display: grid; grid-template-columns: 64px 1fr; height: 100dvh; }
+/* 行高必须用 minmax(0, 1fr) 锁在视口内：默认的 auto 会被内容撑开，里面的列表就滚不动了 */
+.app { display: grid; grid-template-columns: 64px 1fr; grid-template-rows: minmax(0, 1fr); height: 100dvh; }
 .rail {
   display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 0;
   border-right: 1px solid var(--line); background: var(--page);
@@ -165,8 +178,9 @@ h1, h2, h3 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 .auth-brand b { font-size: 20px; display: block; line-height: 1.2; }
 
 /* ---------- 邮件 ---------- */
-.mail { display: grid; grid-template-columns: 232px minmax(300px, 380px) 1fr; height: 100%; }
+.mail { display: grid; grid-template-columns: 232px minmax(300px, 380px) 1fr; grid-template-rows: minmax(0, 1fr); height: 100%; }
 .side { display: flex; flex-direction: column; gap: 4px; padding: 14px 10px; overflow-y: auto; border-right: 1px solid var(--line); }
+.side > * { flex: none; }
 .side-title { padding: 14px 10px 4px; font-size: 12px; font-weight: 650; color: var(--muted); display: flex; align-items: center; gap: 8px; }
 .side-item {
   display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 10px; border-radius: 9px;
@@ -179,14 +193,14 @@ h1, h2, h3 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 .side-item .count { margin-left: auto; font-size: 12px; color: var(--muted); font-weight: 600; }
 .side-error { margin: 0 10px; font-size: 12px; color: var(--danger); }
 
-.list-pane { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--line); background: var(--panel); }
+.list-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--line); background: var(--panel); }
 .list-head { display: flex; align-items: center; gap: 6px; padding: 12px 12px 8px; }
 .list-title { padding: 2px 16px 10px; display: flex; align-items: baseline; gap: 8px; }
 .list-title h2 { font-size: 17px; }
 .search { position: relative; flex: 1; }
 .search svg { position: absolute; left: 11px; top: 11px; color: var(--muted); pointer-events: none; }
 .search .input { padding-left: 34px; }
-.list-scroll { flex: 1; overflow-y: auto; }
+.list-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .bulk { display: flex; align-items: center; gap: 2px; padding: 4px 10px; border-bottom: 1px solid var(--line); background: var(--accent-soft); }
 
 .msg {
@@ -212,9 +226,9 @@ h1, h2, h3 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 .msg:not(.unread) .msg-subject span { color: var(--ink); opacity: .82; }
 .star { color: #e4ae2d; fill: #e4ae2d; }
 
-.reader { display: flex; flex-direction: column; min-width: 0; background: var(--page); }
+.reader { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--page); }
 .reader-bar { display: flex; align-items: center; gap: 2px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
-.reader-scroll { flex: 1; overflow-y: auto; }
+.reader-scroll { flex: 1; min-height: 0; overflow-y: auto; }
 /* 阅读区限宽：一行 35–40 个汉字最易读 */
 .reader-inner { max-width: 780px; margin: 0 auto; padding: 28px 28px 64px; }
 .reader-subject { font-size: 23px; line-height: 1.35; margin-bottom: 20px; overflow-wrap: anywhere; }
@@ -251,13 +265,13 @@ h1, h2, h3 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 .compose-row label { color: var(--muted); font-size: 13px; width: 44px; flex: none; }
 .compose-row input, .compose-row select { flex: 1; min-width: 0; border: 0; outline: 0; background: none; height: 40px; }
 .editor-bar { display: flex; gap: 2px; padding: 6px 12px; border-bottom: 1px solid var(--line); }
-.editor { flex: 1; overflow-y: auto; padding: 16px 18px; outline: none; font-size: 15px; line-height: 1.7; overflow-wrap: anywhere; }
+.editor { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 18px; outline: none; font-size: 15px; line-height: 1.7; overflow-wrap: anywhere; }
 .editor blockquote, .or-quote { margin: 8px 0; padding-left: 12px; border-left: 3px solid var(--line); color: var(--muted); }
 .compose-atts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 18px 0; }
 .compose-foot { display: flex; align-items: center; gap: 8px; padding: 12px 18px; }
 
 /* ---------- 计划 ---------- */
-.planner { display: grid; grid-template-columns: 1fr 320px; height: 100%; }
+.planner { display: grid; grid-template-columns: 1fr 320px; grid-template-rows: minmax(0, 1fr); height: 100%; }
 .planner-main { overflow-y: auto; padding: 28px 32px 64px; }
 .planner-inner { max-width: 760px; margin: 0 auto; }
 .planner-head { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
@@ -328,7 +342,7 @@ h1, h2, h3 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 .only-mobile { display: none; }
 @media (max-width: 900px) {
   .only-mobile { display: inline-grid; }
-  .app { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+  .app { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; }
   .rail {
     order: 2; flex-direction: row; justify-content: space-around; padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
     border-right: 0; border-top: 1px solid var(--line);

@@ -1,4 +1,4 @@
-# Orbox 部署文档（v0.1.0）
+# Orbox 部署文档
 
 适用场景：一台 Linux 服务器跑 Orbox，MySQL 和 mailcow 各自独立部署。
 
@@ -160,13 +160,27 @@ mysqldump --single-transaction -h 数据库主机 -u orbox -p orbox \
 
 ## 9. 升级
 
+每个新版本会提供一个升级包 `orbox-upgrade-旧版本-to-新版本.tar.gz`，里面只有变化的文件和一个升级脚本，不需要重新上传整份源码。
+
 ```bash
-cd /opt/orbox
-# 更新代码后
-docker compose up -d --build
+tar -xzf orbox-upgrade-0.1.0-to-0.1.1.tar.gz
+sh orbox-upgrade-0.1.0-to-0.1.1/upgrade.sh /opt/orbox
 ```
 
-数据库迁移在启动时自动执行。升级前建议先按第 8 节备份。版本号见 设置页底部 或 `CHANGELOG.md`。
+脚本会做这些事：
+
+1. 检查部署目录的当前版本是否与升级包的起始版本一致，不一致就中止（跨多个版本时按顺序逐个应用）。
+2. 把将被替换的文件备份到部署目录下的 `.upgrade-backup/旧版本-to-新版本/`。
+3. 覆盖变化的文件、删除已移除的文件。**不会动 `.env` 和数据库。**
+4. 执行 `docker compose up -d --build` 重建并重启；数据库迁移在启动时自动执行。
+
+可选的环境变量：`NO_RESTART=1` 只替换文件不重启；`FORCE=1` 跳过版本检查。
+
+回滚：把 `.upgrade-backup/…/` 里的文件拷回原位，再执行 `docker compose up -d --build`。如果该版本包含数据库迁移，回滚前请先恢复升级前的数据库备份（见第 8 节）。
+
+如果你改过 `docker-compose.yml`（例如端口），升级包恰好也更新了它时会被覆盖，改动可以从备份目录里找回。
+
+当前版本号见 设置页底部，各版本内容见 `CHANGELOG.md`。
 
 ## 10. 排查
 

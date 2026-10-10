@@ -1,0 +1,61 @@
+#!/bin/sh
+# Orbox 升级包 @FROM@ → @TO@
+# 用法：解压后执行  sh upgrade.sh /opt/orbox   （参数是 Orbox 的部署目录，省略则为当前目录）
+# 只替换变化的源码文件，不会动 .env 和数据库；被替换的文件会先备份。
+set -eu
+
+FROM="@FROM@"
+TO="@TO@"
+PKG=$(cd "$(dirname "$0")" && pwd)
+TARGET=$(cd "${1:-.}" && pwd)
+
+if [ ! -f "$TARGET/docker-compose.yml" ] || [ ! -f "$TARGET/server/src/config.ts" ]; then
+  echo "错误：$TARGET 不像是 Orbox 的部署目录（缺少 docker-compose.yml 或 server/src）" >&2
+  exit 1
+fi
+
+CURRENT=$(sed -n "s/^export const APP_VERSION = '\(.*\)';$/\1/p" "$TARGET/server/src/config.ts")
+if [ "$CURRENT" = "$TO" ]; then
+  echo "当前已经是 $TO，无需升级。"
+  exit 0
+fi
+if [ "$CURRENT" != "$FROM" ] && [ "${FORCE:-}" != "1" ]; then
+  echo "错误：这个升级包适用于 $FROM，但当前版本是 ${CURRENT:-未知}。" >&2
+  echo "请按顺序使用对应的升级包；确认要强行应用可加 FORCE=1。" >&2
+  exit 1
+fi
+
+BACKUP="$TARGET/.upgrade-backup/$FROM-to-$TO"
+mkdir -p "$BACKUP"
+echo "升级 Orbox $CURRENT → $TO（目录 $TARGET）"
+
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  if [ -f "$TARGET/$f" ]; then
+    mkdir -p "$BACKUP/$(dirname "$f")"
+    cp -p "$TARGET/$f" "$BACKUP/$f"
+  fi
+  mkdir -p "$TARGET/$(dirname "$f")"
+  cp "$PKG/files/$f" "$TARGET/$f"
+  echo "  更新 $f"
+done < "$PKG/changed.txt"
+
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  if [ -f "$TARGET/$f" ]; then
+    mkdir -p "$BACKUP/$(dirname "$f")"
+    mv "$TARGET/$f" "$BACKUP/$f"
+    echo "  删除 $f"
+  fi
+done < "$PKG/deleted.txt"
+
+echo "原文件已备份到 $BACKUP"
+[ -s "$PKG/NOTES.md" ] && { echo; cat "$PKG/NOTES.md"; echo; }
+
+if [ "${NO_RESTART:-}" = "1" ]; then
+  echo "已跳过重启。稍后请在 $TARGET 执行：docker compose up -d --build"
+  exit 0
+fi
+cd "$TARGET"
+docker compose up -d --build
+echo "完成。当前版本 $TO，数据库迁移会在启动时自动执行。"

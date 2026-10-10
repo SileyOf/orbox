@@ -5,7 +5,7 @@ function required(name: string): string {
 }
 
 export const APP_NAME = 'Orbox';
-export const APP_VERSION = '0.1.0';
+export const APP_VERSION = '0.1.1';
 
 export const config = {
   port: Number(process.env.PORT || 8787),

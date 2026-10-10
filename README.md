@@ -1,6 +1,6 @@
 # Orbox
 
-当前版本 0.1.0，更新记录见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 0.1.1，更新记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 起源系列的邮件与计划客户端：多邮箱 Webmail + Telegram 通知 + 带提醒的计划表。
 兼容 mailcow，也能接入任何标准 IMAP/SMTP 邮箱。
