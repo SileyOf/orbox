@@ -12,10 +12,13 @@ import { pool } from './db.js';
 import { setNewMailHandler, startAllAccounts, stopAllAccounts } from './mail/manager.js';
 import { migrate } from './migrate.js';
 import { dispatchNewMail } from './notify/dispatch.js';
-import { startTelegram, stopTelegram } from './notify/telegram.js';
+import { startBots, stopBots } from './bots/hub.js';
 import { accountRoutes } from './routes/accounts.js';
 import { mailRoutes } from './routes/mail.js';
 import { taskRoutes } from './routes/tasks.js';
+import { aiRoutes } from './routes/ai.js';
+import { mcpRoutes } from './routes/mcp.js';
+import { publicRoutes } from './routes/public.js';
 import { startScheduler } from './tasks/scheduler.js';
 
 const app = Fastify({ logger: { level: 'warn' }, bodyLimit: 10 * 1024 * 1024, trustProxy: true, forceCloseConnections: true });
@@ -35,13 +38,16 @@ await app.register(authRoutes);
 await app.register(accountRoutes);
 await app.register(mailRoutes);
 await app.register(taskRoutes);
+await app.register(aiRoutes);
+await app.register(mcpRoutes);
+await app.register(publicRoutes);
 
 // 生产环境由同一个进程托管前端构建产物
 const webDist = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
 if (existsSync(webDist)) {
   await app.register(fastifyStatic, { root: webDist });
   app.setNotFoundHandler((req, reply) =>
-    req.url.startsWith('/api/') ? reply.code(404).send({ error: 'Not found' }) : reply.sendFile('index.html'),
+    req.url.startsWith('/api/') || req.url.startsWith('/mcp') ? reply.code(404).send({ error: 'Not found' }) : reply.sendFile('index.html'),
   );
 }
 
@@ -67,7 +73,7 @@ for (;;) {
   }
 }
 await migrate();
-void startTelegram();
+void startBots();
 setNewMailHandler(dispatchNewMail);
 await startAllAccounts();
 const stopScheduler = startScheduler();
@@ -79,7 +85,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, async () => {
     stopScheduler();
     stopAllAccounts();
-    await stopTelegram();
+    await stopBots();
     await app.close();
     await pool.end();
     process.exit(0);

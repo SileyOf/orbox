@@ -5,7 +5,8 @@ import { config } from '../config.js';
 import { decrypt, encrypt, randomToken } from '../crypto.js';
 import { exec, one, query } from '../db.js';
 import { emit } from '../events.js';
-import { startAccount, stopAccount, testConnection, worker } from '../mail/manager.js';
+import { connParams, startAccount, stopAccount, testConnection, worker } from '../mail/manager.js';
+import { SCRIPT_NAME, SieveClient, buildScript, parseScript, ruleSchema } from '../mail/sieve.js';
 import type { AccountRow } from '../mail/manager.js';
 import { exchangeMicrosoftCode, forgetAccessToken, microsoftAuthUrl, microsoftEnabled } from '../mail/oauth.js';
 
@@ -28,11 +29,13 @@ const accountBody = z.object({
   signature: z.string().max(5000).default(''),
   notify: z.boolean().default(true),
   save_sent: z.boolean().default(true),
+  /** 允许 AI（内置助手和 MCP 外部连接）读取这个邮箱，默认关闭 */
+  ai_enabled: z.boolean().default(false),
 });
 
 const COLUMNS = [
   'name', 'email', 'from_name', 'color', 'imap_host', 'imap_port', 'imap_secure',
-  'smtp_host', 'smtp_port', 'smtp_secure', 'username', 'signature', 'notify', 'save_sent',
+  'smtp_host', 'smtp_port', 'smtp_secure', 'username', 'signature', 'notify', 'save_sent', 'ai_enabled',
 ] as const;
 const OAUTH_COOKIE = 'orbox_oauth_state';
 const CONN_FIELDS = ['imap_host', 'imap_port', 'imap_secure', 'smtp_host', 'smtp_port', 'smtp_secure', 'username'] as const;
@@ -76,10 +79,13 @@ export async function accountRoutes(app: FastifyInstance) {
       req.user.id,
     ]);
     if (!current) return reply.code(404).send({ error: '邮箱不存在' });
-    const body = accountBody.partial().parse(req.body);
+    // partial() 仍会给缺省字段填默认值，这里只保留请求里真正出现的字段
+    const parsed = accountBody.partial().parse(req.body);
+    const sent = new Set(Object.keys((req.body as object) || {}));
+    const body = Object.fromEntries(Object.entries(parsed).filter(([k]) => sent.has(k))) as typeof parsed;
     if (current.auth_type === 'oauth') {
       // OAuth 邮箱的服务器和凭据由授权流程决定，这里只允许改展示和行为相关的字段
-      const editable = ['name', 'from_name', 'color', 'signature', 'notify', 'save_sent'] as const;
+      const editable = ['name', 'from_name', 'color', 'signature', 'notify', 'save_sent', 'ai_enabled'] as const;
       const next = { ...current, ...Object.fromEntries(editable.filter((k) => k in body).map((k) => [k, body[k]])) };
       await exec(`UPDATE accounts SET ${editable.map((c) => `${c} = ?`).join(', ')} WHERE id = ?`, [
         ...editable.map((c) => next[c]),
@@ -121,6 +127,66 @@ export async function accountRoutes(app: FastifyInstance) {
     await exec('DELETE FROM accounts WHERE id = ?', [row.id]);
     emit(req.user.id, { type: 'accounts' });
     return { ok: true };
+  });
+
+  async function withSieve<T>(account: AccountRow, fn: (c: SieveClient) => Promise<T>): Promise<T> {
+    if (account.auth_type === 'oauth') throw new Error('Outlook 邮箱不支持 ManageSieve，请在 Outlook 网页版里设置规则');
+    const p = await connParams(account);
+    const c = new SieveClient(account.imap_host, account.sieve_port);
+    try {
+      // 只有 IMAP 本身就没开加密的邮箱（通常是本地测试服务器）才允许明文
+      await c.connect(p.username, p.password!, !!account.imap_secure);
+      return await fn(c);
+    } finally {
+      await c.close();
+    }
+  }
+
+  const ownAccount = (req: { params: { id: string }; user: { id: number } }) =>
+    one<AccountRow>('SELECT * FROM accounts WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+
+  app.get<{ Params: { id: string } }>('/api/accounts/:id/sieve', async (req, reply) => {
+    const account = await ownAccount(req);
+    if (!account) return reply.code(404).send({ error: '邮箱不存在' });
+    try {
+      return await withSieve(account, async (c) => {
+        const scripts = await c.list();
+        const mine = scripts.some((s) => s.name === SCRIPT_NAME) ? await c.get(SCRIPT_NAME) : null;
+        const set = parseScript(mine);
+        const otherActive = scripts.find((s) => s.active && s.name !== SCRIPT_NAME)?.name ?? null;
+        return {
+          supported: true,
+          rules: set?.rules ?? [],
+          base: set?.base ?? otherActive,
+          active: scripts.some((s) => s.active && s.name === SCRIPT_NAME),
+          script: mine,
+          extensions: (c.capabilities.get('SIEVE') || '').split(' ').filter(Boolean),
+        };
+      });
+    } catch (e: any) {
+      return { supported: false, error: e.message };
+    }
+  });
+
+  app.put<{ Params: { id: string } }>('/api/accounts/:id/sieve', async (req, reply) => {
+    const account = await ownAccount(req);
+    if (!account) return reply.code(404).send({ error: '邮箱不存在' });
+    const body = z.object({ rules: z.array(ruleSchema).max(100) }).parse(req.body);
+    try {
+      return await withSieve(account, async (c) => {
+        const scripts = await c.list();
+        const previous = parseScript(scripts.some((s) => s.name === SCRIPT_NAME) ? await c.get(SCRIPT_NAME) : null);
+        // 第一次启用时记住原来激活的脚本，以后一直 include 它，原有规则照常生效
+        const base = previous?.base ?? scripts.find((s) => s.active && s.name !== SCRIPT_NAME)?.name ?? null;
+        const script = buildScript({ rules: body.rules, base });
+        await c.check(script);
+        await c.put(SCRIPT_NAME, script);
+        await c.activate(SCRIPT_NAME);
+        return { ok: true, script };
+      });
+    } catch (e: any) {
+      return reply.code(400).send({ error: e.message });
+    }
   });
 
   app.get('/api/oauth/providers', async () => ({ microsoft: microsoftEnabled() }));

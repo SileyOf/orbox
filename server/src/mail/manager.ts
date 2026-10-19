@@ -1,11 +1,14 @@
 import { ImapFlow } from 'imapflow';
-import type { FetchMessageObject, MessageAddressObject, MessageStructureObject } from 'imapflow';
+import type { FetchMessageObject, FetchQueryObject, MessageAddressObject, MessageStructureObject } from 'imapflow';
 import nodemailer from 'nodemailer';
 import { decrypt } from '../crypto.js';
 import { exec, one, query } from '../db.js';
 import { emit } from '../events.js';
 import { forgetAccessToken, getAccessToken } from './oauth.js';
 import { extractCode } from './code.js';
+import { extractLinks } from './links.js';
+import { parseRefs, subjectKey } from './thread-keys.js';
+import { assignThreads } from './threads.js';
 import { htmlToPlain, makeSnippet, parseSource, structureHasAttachments } from './parse.js';
 import type { ParsedBody } from './parse.js';
 
@@ -29,6 +32,8 @@ export interface AccountRow {
   signature: string | null;
   notify: number;
   save_sent: number;
+  ai_enabled: number;
+  sieve_port: number;
 }
 
 export interface FolderRow {
@@ -64,8 +69,18 @@ const MAX_NOTIFY_PER_SYNC = 8;
 /** 快速通道只取正文开头这么多字节，足够生成摘要和提取验证码 */
 const PEEK_BYTES = 128 * 1024;
 
-const ENVELOPE_COLUMNS = `user_id, account_id, folder_id, uid, message_id, in_reply_to, subject, from_name, from_addr,
-  to_json, cc_json, reply_to, date, size, seen, flagged, answered, has_attachments, notified`;
+const ENVELOPE_COLUMNS = `user_id, account_id, folder_id, uid, message_id, in_reply_to, refs, subject, subject_key,
+  from_name, from_addr, to_json, cc_json, reply_to, date, size, seen, flagged, answered, has_attachments, notified`;
+
+const ENVELOPE_QUERY: FetchQueryObject = {
+  uid: true,
+  flags: true,
+  envelope: true,
+  bodyStructure: true,
+  size: true,
+  internalDate: true,
+  headers: ['references'],
+};
 
 const recountFolder = (folderId: number) =>
   exec(
@@ -302,7 +317,7 @@ class AccountWorker {
         const fresh = (
           await c.fetchAll(
             `${last + 1}:*`,
-            { uid: true, flags: true, envelope: true, bodyStructure: true, size: true, internalDate: true },
+            ENVELOPE_QUERY,
             { uid: true },
           )
         ).filter((m) => m.uid > last);
@@ -310,6 +325,7 @@ class AccountWorker {
         await exec(`INSERT IGNORE INTO messages (${ENVELOPE_COLUMNS}) VALUES ?`, [
           fresh.map((m) => this.envelopeRow(inbox.id, m, m.flags?.has('\\Seen') ? 1 : 0)),
         ]);
+        await assignThreads(accountId);
         await exec('UPDATE folders SET last_uid = GREATEST(last_uid, ?) WHERE id = ?', [
           Math.max(...fresh.map((m) => m.uid)),
           inbox.id,
@@ -318,11 +334,12 @@ class AccountWorker {
           if (m.flags?.has('\\Seen')) continue;
           const row = await one<{ id: number }>('SELECT id FROM messages WHERE folder_id = ? AND uid = ?', [inbox.id, m.uid]);
           if (!row) continue;
-          const text = await this.peekText(c, m).catch(() => '');
-          if (text) {
-            await exec('UPDATE messages SET snippet = ?, code = ? WHERE id = ? AND body_fetched = 0', [
-              makeSnippet(text),
-              extractCode(m.envelope?.subject || '', text),
+          const peek = await this.peekText(c, m).catch(() => null);
+          if (peek?.text) {
+            await exec('UPDATE messages SET snippet = ?, code = ?, links = ? WHERE id = ? AND body_fetched = 0', [
+              makeSnippet(peek.text),
+              extractCode(m.envelope?.subject || '', peek.text),
+              JSON.stringify(extractLinks(peek.html, peek.html ? null : peek.text)),
               row.id,
             ]);
           }
@@ -339,15 +356,18 @@ class AccountWorker {
     }
   }
 
-  /** 只下载正文部分的开头并转成纯文本 */
-  private async peekText(c: ImapFlow, m: FetchMessageObject): Promise<string> {
-    const plain = findTextPart(m.bodyStructure, 'text/plain');
-    const part = plain || findTextPart(m.bodyStructure, 'text/html');
-    if (!part) return '';
+  /**
+   * 只下载正文部分的开头。有 HTML 版本时取 HTML（链接的文字说明只在 HTML 里有），
+   * 否则取纯文本。
+   */
+  private async peekText(c: ImapFlow, m: FetchMessageObject): Promise<{ text: string; html: string | null }> {
+    const htmlPart = findTextPart(m.bodyStructure, 'text/html');
+    const part = htmlPart || findTextPart(m.bodyStructure, 'text/plain');
+    if (!part) return { text: '', html: null };
     const dl = await c.download(String(m.uid), part, { uid: true, maxBytes: PEEK_BYTES });
-    if (!dl.content) return '';
-    const text = (await readAll(dl.content)).toString('utf8');
-    return plain ? text : htmlToPlain(text);
+    if (!dl.content) return { text: '', html: null };
+    const raw = (await readAll(dl.content)).toString('utf8');
+    return htmlPart ? { text: htmlToPlain(raw), html: raw } : { text: raw, html: null };
   }
 
   /** 用带条件的更新认领通知权，快速通道和常规同步谁先到谁发，保证每封只通知一次 */
@@ -390,6 +410,8 @@ class AccountWorker {
         if (this.stopped) return;
         await this.syncFolder(f);
       }
+      // 升级前就存在的邮件还没有线程，借每轮同步的尾巴慢慢补上
+      await assignThreads(this.account.id);
       await this.setState('ok');
     } catch (e) {
       await this.setState('error', errMsg(e));
@@ -461,7 +483,7 @@ class AccountWorker {
         const fetched = await this.withFolder(folder.path, (c) =>
           c.fetchAll(
             uids.join(','),
-            { uid: true, flags: true, envelope: true, bodyStructure: true, size: true, internalDate: true },
+            ENVELOPE_QUERY,
             { uid: true },
           ),
         );
@@ -477,6 +499,7 @@ class AccountWorker {
         if (missing.length > ENVELOPE_CHUNK) emit(userId, { type: 'mail', accountId, folderId: folder.id });
       }
 
+      if (missing.length) await assignThreads(accountId);
       const maxUid = (await one<{ m: number | null }>('SELECT MAX(uid) AS m FROM messages WHERE folder_id = ?', [
         folder.id,
       ]))!.m;
@@ -526,7 +549,9 @@ class AccountWorker {
       m.uid,
       env.messageId?.slice(0, 500) || null,
       env.inReplyTo?.slice(0, 500) || null,
+      parseRefs(m.headers),
       (env.subject || '').slice(0, 1000),
+      subjectKey(env.subject || ''),
       (from?.name || '').slice(0, 255),
       (from?.address || '').slice(0, 255),
       addrList(env.to),
@@ -565,7 +590,7 @@ class AccountWorker {
     const meta = await one<{ subject: string }>('SELECT subject FROM messages WHERE id = ?', [messageId]);
     await exec(
       `UPDATE messages SET body_fetched = 1, body_text = ?, body_html = ?, snippet = ?, code = ?, attachments = ?,
-         has_attachments = ? WHERE id = ?`,
+         has_attachments = ?, links = ? WHERE id = ?`,
       [
         body.text,
         body.html,
@@ -573,6 +598,7 @@ class AccountWorker {
         extractCode(meta?.subject || '', body.text),
         JSON.stringify(body.attachments),
         +body.attachments.some((a) => !a.inline),
+        JSON.stringify(extractLinks(body.html, body.html ? null : body.text)),
         messageId,
       ],
     );

@@ -11,6 +11,9 @@ import { api, folderLabel } from '../api';
 import type { Account, Folder, MessageFull, MessageItem, OutboxItem } from '../api';
 import { Compose, loadSavedDraft } from '../components/Compose';
 import type { Draft } from '../components/Compose';
+import { AiBar } from '../components/AiBar';
+import { Conversation } from '../components/Conversation';
+import { LinksPanel } from '../components/LinksPanel';
 import { MessageBody, sanitizeMail } from '../components/MessageBody';
 import { copyText, dueLabel, escapeHtml, fileSize, fullDate, shortDate, toast, toastError } from '../lib';
 
@@ -94,7 +97,10 @@ export function MailPage() {
     setParams(p);
   };
 
-  const listKey = { view, folderId, accountId, q };
+  // 搜索结果总是逐封列出，其余视图按设置折叠成会话
+  const grouped = user.settings.threads && view !== 'search' && view !== 'outbox';
+  const listKey = { view, folderId, accountId, q, grouped };
+  const aiConfig = useQuery({ queryKey: ['ai-config'], queryFn: () => api<{ active: boolean }>('/ai/config'), staleTime: 5 * 60_000 });
   const list = useInfiniteQuery({
     queryKey: ['messages', listKey],
     enabled: view !== 'outbox',
@@ -104,6 +110,7 @@ export function MailPage() {
       if (folderId) p.set('folderId', String(folderId));
       if (accountId) p.set('accountId', String(accountId));
       if (q) p.set('q', q);
+      if (grouped) p.set('threads', '1');
       if (pageParam) p.set('before', pageParam);
       return api<Page>(`/messages?${p}`);
     },
@@ -127,11 +134,11 @@ export function MailPage() {
       data ? { ...data, pages: data.pages.map((p) => ({ ...p, items: fn(p.items) })) } : data,
     );
 
-  async function setFlag(ids: number[], patch: { seen?: boolean; flagged?: boolean }) {
+  async function setFlag(ids: number[], patch: { seen?: boolean; flagged?: boolean }, threads = false) {
     const fields = Object.fromEntries(Object.entries(patch).map(([k, v]) => [k, +v!]));
     patchLists((list) => list.map((m) => (ids.includes(m.id) ? { ...m, ...fields } : m)));
     if (current && ids.includes(current.id)) qc.setQueryData(['message', current.id], { ...current, ...fields });
-    await api('/messages/flags', { body: { ids, ...patch } }).catch(toastError);
+    await api('/messages/flags', { body: { ids, ...patch, threads } }).catch(toastError);
   }
 
   async function move(ids: number[], to: 'archive' | 'trash' | 'junk' | 'inbox') {
@@ -144,7 +151,8 @@ export function MailPage() {
     patchLists((list) => list.filter((m) => !ids.includes(m.id)));
     setSelected(new Set());
     try {
-      await api('/messages/move', { body: { ids, to } });
+      // 会话视图下归档/删除一行等于处理整个会话（只限同一个文件夹里的邮件）
+      await api('/messages/move', { body: { ids, to, threads: grouped } });
     } catch (e) {
       toastError(e);
       qc.invalidateQueries({ queryKey: ['messages'] });
@@ -195,7 +203,7 @@ export function MailPage() {
     if (current && !current.seen) void setFlag([current.id], { seen: true });
   }, [current?.id]);
 
-  function startCompose(kind: 'new' | 'reply' | 'replyAll' | 'forward', m?: MessageFull) {
+  function startCompose(kind: 'new' | 'reply' | 'replyAll' | 'forward', m?: MessageFull, prefill = '') {
     if (!accounts.length) return toast('请先在设置里添加邮箱', { kind: 'error' });
     const account = (m && accountOf(m.account_id)) || accountOf(accountId || 0) || accounts[0];
     const blank: Draft = { accountId: account.id, to: '', cc: '', bcc: '', subject: '', html: signatureHtml(account), files: [] };
@@ -213,7 +221,7 @@ export function MailPage() {
       to: m.reply_to || m.from_addr,
       cc: kind === 'replyAll' ? [...new Set(others)].join(', ') : '',
       subject: withPrefix('Re', m.subject),
-      html: signatureHtml(account) + quoted(m),
+      html: (prefill ? escapeHtml(prefill).split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('') : '') + signatureHtml(account) + quoted(m),
       replyTo: m.id,
     });
   }
@@ -339,8 +347,8 @@ export function MailPage() {
         {selected.size ? (
           <div className="bulk">
             <span className="small grow" style={{ paddingLeft: 6 }}>已选 {selected.size} 封</span>
-            <button className="icon-btn" title="标为已读" onClick={() => (setFlag(selectedIds, { seen: true }), setSelected(new Set()))}><MailOpen size={17} /></button>
-            <button className="icon-btn" title="标为未读" onClick={() => (setFlag(selectedIds, { seen: false }), setSelected(new Set()))}><Mail size={17} /></button>
+            <button className="icon-btn" title="标为已读" onClick={() => (setFlag(selectedIds, { seen: true }, grouped), setSelected(new Set()))}><MailOpen size={17} /></button>
+            <button className="icon-btn" title="标为未读" onClick={() => (setFlag(selectedIds, { seen: false }, grouped), setSelected(new Set()))}><Mail size={17} /></button>
             <button className="icon-btn" title="归档" onClick={() => move(selectedIds, 'archive')}><Archive size={17} /></button>
             <button className="icon-btn" title="删除" onClick={() => move(selectedIds, 'trash')}><Trash2 size={17} /></button>
             <button className="btn ghost sm" onClick={() => setSelected(new Set())}>取消</button>
@@ -382,7 +390,7 @@ export function MailPage() {
           {view !== 'outbox' && items.map((m) => {
             const outgoing = m.folder_role === 'sent' || m.folder_role === 'drafts';
             return (
-              <div key={m.id} className={`msg${m.seen ? '' : ' unread'}${m.id === openId ? ' active' : ''}`} onClick={() => open(m.id)}>
+              <div key={m.id} className={`msg${m.seen && !m.thread_unread ? '' : ' unread'}${m.id === openId ? ' active' : ''}`} onClick={() => open(m.id)}>
                 {accounts.length > 1 && <span className="msg-bar" style={{ background: accountOf(m.account_id)?.color }} />}
                 <label className="msg-mark" onClick={(e) => e.stopPropagation()}>
                   <input
@@ -399,6 +407,7 @@ export function MailPage() {
                 <div style={{ minWidth: 0 }}>
                   <div className="msg-top">
                     <span className="msg-from truncate">{outgoing ? `收件人：${addrText(m.to)}` : m.from_name || m.from_addr}</span>
+                    {(m.thread_count ?? 1) > 1 && <span className="thread-count">{m.thread_count}</span>}
                     <span className="msg-date">{shortDate(m.date)}</span>
                   </div>
                   <div className="msg-subject">
@@ -473,6 +482,9 @@ export function MailPage() {
             <div className="reader-scroll" key={current.id}>
               <article className="reader-inner">
                 <h1 className="reader-subject">{current.subject || '(无主题)'}</h1>
+                {current.thread_id && (
+                  <Conversation threadId={current.thread_id} currentId={current.id} part="before" blockRemote={user.settings.blockRemoteImages} onOpen={(id) => open(id)} />
+                )}
                 <div className="reader-meta">
                   <div className="avatar" style={{ background: avatarColor(current.from_addr) }}>
                     {(current.from_name || current.from_addr || '?').trim()[0]?.toUpperCase()}
@@ -501,6 +513,10 @@ export function MailPage() {
                     <Copy size={15} /> 复制
                   </button>
                 )}
+                {aiConfig.data?.active && accountOf(current.account_id)?.ai_enabled ? (
+                  <AiBar key={current.id} message={current} translateTo={user.settings.translateTo} onReply={(text) => startCompose('reply', current, text)} />
+                ) : null}
+                <LinksPanel links={current.links} />
                 <MessageBody key={`${current.id}-${user.settings.theme}`} message={current} blockRemote={user.settings.blockRemoteImages} />
                 {current.attachments.length > 0 && (
                   <div className="atts">
@@ -514,6 +530,9 @@ export function MailPage() {
                       </a>
                     ))}
                   </div>
+                )}
+                {current.thread_id && (
+                  <Conversation threadId={current.thread_id} currentId={current.id} part="after" blockRemote={user.settings.blockRemoteImages} onOpen={(id) => open(id)} />
                 )}
               </article>
             </div>

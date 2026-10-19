@@ -1,9 +1,10 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Pencil, Plus, Send, Trash2 } from 'lucide-react';
+import { Filter, Pencil, Plus, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import type { FormEvent, ReactNode } from 'react';
 import { useAccounts, useSaveSettings, useUser } from '../App';
+import { AiSection, BotsSection, McpSection, SieveDialog } from '../components/SettingsExtra';
 import { api } from '../api';
 import type { Account, UserSettings } from '../api';
 import { ACCENTS, toast, toastError } from '../lib';
@@ -35,6 +36,7 @@ export function Settings() {
   const save = useSaveSettings();
   const { data: accounts = [] } = useAccounts();
   const [editing, setEditing] = useState<Account | 'new' | null>(null);
+  const [sieve, setSieve] = useState<Account | null>(null);
   const s = user.settings;
   const [params, setParams] = useSearchParams();
   const about = useQuery({ queryKey: ['auth-status'], queryFn: () => api<{ version: string }>('/auth/status') });
@@ -48,22 +50,6 @@ export function Settings() {
   }, [params]);
 
   const set = (patch: Partial<UserSettings>) => save({ settings: patch }).catch(toastError);
-
-  const tg = useQuery({
-    queryKey: ['telegram'],
-    queryFn: () => api<{ enabled: boolean; bot: string | null; linked: { username: string } | null }>('/telegram'),
-    // 等待用户在 Telegram 里点 Start 的这段时间轮询绑定状态
-    refetchInterval: (q) => (q.state.data?.enabled && !q.state.data.linked ? 4000 : false),
-  });
-
-  async function linkTelegram() {
-    try {
-      const { url } = await api<{ url: string }>('/telegram/link', { method: 'POST' });
-      window.open(url, '_blank', 'noopener');
-    } catch (e) {
-      toastError(e);
-    }
-  }
 
   async function logout() {
     await api('/auth/logout', { method: 'POST' });
@@ -93,6 +79,7 @@ export function Settings() {
                     </div>
                   </div>
                 </div>
+                <button className="icon-btn" title="服务器端过滤规则" onClick={() => setSieve(a)}><Filter size={16} /></button>
                 <button className="icon-btn" title="编辑" onClick={() => setEditing(a)}><Pencil size={16} /></button>
                 <button
                   className="icon-btn"
@@ -127,6 +114,9 @@ export function Settings() {
                 <input className="swatch-custom" type="color" value={s.accent} onChange={(e) => set({ accent: e.target.value })} title="自定义颜色" />
               </div>
             </Setting>
+            <Setting title="按会话分组" hint="同一个话题的往来邮件在列表里折叠成一行">
+              <Switch checked={s.threads} onChange={(v) => set({ threads: v })} />
+            </Setting>
             <Setting title="拦截远程图片" hint="阻止邮件里的追踪像素得知你已读，可在单封邮件里手动放行">
               <Switch checked={s.blockRemoteImages} onChange={(v) => set({ blockRemoteImages: v })} />
             </Setting>
@@ -136,27 +126,6 @@ export function Settings() {
         <section className="section">
           <h2>通知</h2>
           <div className="card">
-            <Setting
-              title="Telegram"
-              hint={
-                !tg.data?.enabled
-                  ? '服务器还没有配置机器人 Token（TELEGRAM_BOT_TOKEN）'
-                  : tg.data.linked
-                    ? `已绑定 ${tg.data.linked.username ? '@' + tg.data.linked.username : ''}，机器人 @${tg.data.bot}`
-                    : `点击绑定后在 Telegram 里按 Start 即可，机器人 @${tg.data.bot}`
-              }
-            >
-              {tg.data?.linked ? (
-                <>
-                  <button className="btn sm" onClick={() => api('/telegram/test', { body: {} }).then(() => toast('已发送测试消息')).catch(toastError)}>
-                    <Send size={14} /> 测试
-                  </button>
-                  <button className="btn sm danger" onClick={() => api('/telegram', { method: 'DELETE' }).then(() => tg.refetch())}>解绑</button>
-                </>
-              ) : (
-                <button className="btn sm accent" disabled={!tg.data?.enabled} onClick={linkTelegram}>绑定</button>
-              )}
-            </Setting>
             <Setting title="新邮件通知" hint="每个邮箱还可以在账号设置里单独关闭">
               <Switch checked={s.notifyMail} onChange={(v) => set({ notifyMail: v })} />
             </Setting>
@@ -212,12 +181,17 @@ export function Settings() {
             <Channel name="ntfy" title="ntfy" placeholder="https://ntfy.sh/你的主题" hint="填完整的主题地址，支持自建服务器" value={s.channels.ntfy} onSave={(v) => set({ channels: { ...s.channels, ntfy: v } })} />
             <Channel name="webhook" title="Webhook" placeholder="https://example.com/hook" hint="每条通知以 JSON POST 到这个地址，字段有 title、body、text、url、code" value={s.channels.webhook} onSave={(v) => set({ channels: { ...s.channels, webhook: v } })} />
           </div>
-          <div className="muted small">这些通道只能单向推送，没有 Telegram 那样的操作按钮。新邮件和计划提醒会同时发往所有已填写的通道。</div>
+          <div className="muted small">这些通道只能单向推送，没有聊天机器人那样的操作按钮。新邮件和计划提醒会同时发往所有已填写的通道。</div>
         </section>
+
+        <BotsSection />
+        <AiSection />
+        <McpSection />
 
         <Profile onLogout={logout} />
         <div className="muted small" style={{ textAlign: 'center' }}>Orbox {about.data?.version && `v${about.data.version}`} · 起源</div>
       </div>
+      {sieve && <SieveDialog account={sieve} onClose={() => setSieve(null)} />}
       {editing && <AccountDialog account={editing === 'new' ? null : editing} onClose={() => setEditing(null)} />}
     </div>
   );
@@ -343,6 +317,7 @@ function AccountDialog({ account, onClose }: { account: Account | null; onClose:
     signature: account?.signature ?? '',
     notify: account ? !!account.notify : true,
     save_sent: account ? !!account.save_sent : true,
+    ai_enabled: account ? !!account.ai_enabled : false,
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -495,6 +470,9 @@ function AccountDialog({ account, onClose }: { account: Account | null; onClose:
           <label className="row grow"><Switch checked={f.notify} onChange={(v) => set('notify', v)} /> 新邮件通知</label>
           <label className="row grow" title="mailcow 等自建邮箱需要开启；Gmail 会自动保存，应关闭"><Switch checked={f.save_sent} onChange={(v) => set('save_sent', v)} /> 发信后存入"已发送"</label>
         </div>
+        <label className="row" title="开启后，这个邮箱的邮件内容会发给你在 设置 → AI 里配置的模型，也能被 MCP 连接的外部 AI 读取">
+          <Switch checked={f.ai_enabled} onChange={(v) => set('ai_enabled', v)} /> 允许 AI 读取这个邮箱（摘要、翻译、助手、MCP）
+        </label>
         {error && <div style={{ color: 'var(--danger)' }}>{error}</div>}
         <div className="dialog-foot">
           <button type="button" className="btn ghost" onClick={onClose}>取消</button>

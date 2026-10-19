@@ -24,6 +24,20 @@ export interface UserSettings {
   codeAlways: boolean;
   /** Telegram 之外的推送通道地址，空字符串表示未启用 */
   channels: { bark: string; ntfy: string; webhook: string };
+  /** 会话视图：列表按会话折叠 */
+  threads: boolean;
+  /** 翻译的目标语言 */
+  translateTo: string;
+  /** 只推送 AI 判定为重要的邮件（验证码、重点发件人始终推送） */
+  aiFilter: boolean;
+  ai?: {
+    provider: 'anthropic' | 'openai';
+    baseUrl: string;
+    model: string;
+    fastModel: string;
+    /** 加密存储，不会返回给前端 */
+    apiKeyEnc: string;
+  };
 }
 
 export const defaultSettings: UserSettings = {
@@ -39,6 +53,9 @@ export const defaultSettings: UserSettings = {
   mutedSenders: [],
   codeAlways: true,
   channels: { bark: '', ntfy: '', webhook: '' },
+  threads: true,
+  translateTo: '简体中文',
+  aiFilter: false,
 };
 
 export interface User {
@@ -68,6 +85,15 @@ function toUser(row: any): User {
       ...(row.settings || {}),
       channels: { ...defaultSettings.channels, ...(row.settings?.channels || {}) },
     },
+  };
+}
+
+/** 返回给前端的用户信息：去掉加密存储的 API Key，只告诉前端配置了没有 */
+export function publicUser(u: User) {
+  const { ai, ...settings } = u.settings;
+  return {
+    ...u,
+    settings: { ...settings, ai: ai ? { provider: ai.provider, baseUrl: ai.baseUrl, model: ai.model, fastModel: ai.fastModel, hasKey: !!ai.apiKeyEnc } : null },
   };
 }
 
@@ -138,6 +164,9 @@ const profilePatch = z.object({
       mutedSenders: senderList,
       codeAlways: z.boolean(),
       channels: z.object({ bark: channelUrl, ntfy: channelUrl, webhook: channelUrl }).partial(),
+      threads: z.boolean(),
+      translateTo: z.string().trim().min(2).max(30),
+      aiFilter: z.boolean(),
     })
     .partial()
     .optional(),
@@ -165,7 +194,7 @@ export async function authRoutes(app: FastifyInstance) {
       count === 0 ? 1 : 0,
     ]);
     await startSession(req, reply, res.insertId);
-    return getUser(res.insertId);
+    return publicUser((await getUser(res.insertId))!);
   });
 
   app.post('/api/auth/login', async (req, reply) => {
@@ -175,7 +204,7 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.code(401).send({ error: '邮箱或密码错误' });
     }
     await startSession(req, reply, Number(row.id));
-    return toUser(row);
+    return publicUser(toUser(row));
   });
 
   app.post('/api/auth/logout', async (req, reply) => {
@@ -185,7 +214,7 @@ export async function authRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
-  app.get('/api/me', { preHandler: requireUser }, async (req) => req.user);
+  app.get('/api/me', { preHandler: requireUser }, async (req) => publicUser(req.user));
 
   app.patch('/api/me', { preHandler: requireUser }, async (req, reply) => {
     const body = profilePatch.parse(req.body);
@@ -207,6 +236,6 @@ export async function authRoutes(app: FastifyInstance) {
       }),
       user.id,
     ]);
-    return getUser(user.id);
+    return publicUser((await getUser(user.id))!);
   });
 }

@@ -8,7 +8,7 @@ import { flushOutbox, saveDraft, scheduleMail, sendMail } from '../mail/send.js'
 import type { AttachmentMeta } from '../mail/parse.js';
 
 const LIST_COLUMNS = `m.id, m.account_id, m.folder_id, m.subject, m.from_name, m.from_addr, m.to_json AS \`to\`,
-  m.date, m.seen, m.flagged, m.answered, m.has_attachments, m.snippet, m.code, m.snoozed_until, f.role AS folder_role, f.name AS folder_name`;
+  m.date, m.seen, m.flagged, m.answered, m.has_attachments, m.snippet, m.code, m.snoozed_until, m.thread_id, f.role AS folder_role, f.name AS folder_name`;
 
 const listQuery = z.object({
   view: z.enum(['inbox', 'unread', 'starred', 'snoozed', 'folder', 'search']).default('inbox'),
@@ -17,6 +17,8 @@ const listQuery = z.object({
   q: z.string().trim().max(200).optional(),
   before: z.string().regex(/^\d+_\d+$/).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
+  /** 按会话分组：每个会话只返回最新的一封，附带会话里的邮件数和未读数 */
+  threads: z.enum(['0', '1']).default('0'),
 });
 
 const ids = z.array(z.number().int()).min(1).max(500);
@@ -94,6 +96,21 @@ export async function moveMessages(userId: number, messageIds: number[], to: str
   }
 }
 
+/**
+ * 会话视图里对一行的操作要作用到整个会话：标记已读时包括所有文件夹里的同会话邮件，
+ * 移动时只动和被选中那封在同一个文件夹里的（不会把"已发送"里的回复也挪走）。
+ */
+async function expandThreads(userId: number, messageIds: number[], sameFolder: boolean): Promise<number[]> {
+  const rows = await query<{ id: number }>(
+    `SELECT m.id FROM messages m JOIN messages s ON s.thread_id = m.thread_id AND s.user_id = m.user_id
+       ${sameFolder ? 'AND s.folder_id = m.folder_id' : ''}
+     WHERE s.user_id = ? AND s.id IN (?)
+     UNION SELECT id FROM messages WHERE user_id = ? AND id IN (?)`,
+    [userId, messageIds, userId, messageIds],
+  );
+  return rows.map((r) => r.id).slice(0, 2000);
+}
+
 /** ngram 全文索引下把每个词当短语匹配，并去掉布尔模式的操作符 */
 function fulltextQuery(q: string): string {
   return q
@@ -150,17 +167,39 @@ export async function mailRoutes(app: FastifyInstance) {
       where.push('m.account_id = ?');
       params.push(p.accountId);
     }
+    let cursor = '1 = 1';
+    const cursorParams: unknown[] = [];
     if (p.before) {
       const [ms, id] = p.before.split('_').map(Number);
-      where.push('(m.date < ? OR (m.date = ? AND m.id < ?))');
-      params.push(new Date(ms), new Date(ms), id);
+      cursor = '(date < ? OR (date = ? AND id < ?))';
+      cursorParams.push(new Date(ms), new Date(ms), id);
     }
 
-    const rows = await query(
-      `SELECT ${LIST_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder_id
-       WHERE ${where.join(' AND ')} ORDER BY m.date DESC, m.id DESC LIMIT ?`,
-      [...params, p.limit + 1],
-    );
+    // 搜索结果按单封列出；其余视图可以按会话折叠。分页游标作用在每个会话的最新一封上
+    const grouped = p.threads === '1' && p.view !== 'search';
+    const rows = grouped
+      ? await query(
+          `SELECT * FROM (
+             SELECT ${LIST_COLUMNS},
+               ROW_NUMBER() OVER w AS rn,
+               COUNT(*) OVER (PARTITION BY COALESCE(m.thread_id, m.id)) AS thread_count,
+               SUM(1 - m.seen) OVER (PARTITION BY COALESCE(m.thread_id, m.id)) AS thread_unread
+             FROM messages m JOIN folders f ON f.id = m.folder_id
+             WHERE ${where.join(' AND ')}
+             WINDOW w AS (PARTITION BY COALESCE(m.thread_id, m.id) ORDER BY m.date DESC, m.id DESC)
+           ) t WHERE rn = 1 AND ${cursor} ORDER BY date DESC, id DESC LIMIT ?`,
+          [...params, ...cursorParams, p.limit + 1],
+        )
+      : await query(
+          `SELECT * FROM (SELECT ${LIST_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder_id
+             WHERE ${where.join(' AND ')}) t
+           WHERE ${cursor} ORDER BY date DESC, id DESC LIMIT ?`,
+          [...params, ...cursorParams, p.limit + 1],
+        );
+    for (const r of rows) {
+      delete r.rn;
+      if (r.thread_unread !== undefined) r.thread_unread = Number(r.thread_unread);
+    }
     const items = rows.slice(0, p.limit);
     const last = items[items.length - 1];
     return {
@@ -174,7 +213,7 @@ export async function mailRoutes(app: FastifyInstance) {
       one(
         `SELECT m.id, m.account_id, m.folder_id, m.message_id, m.subject, m.from_name, m.from_addr,
                 m.to_json AS \`to\`, m.cc_json AS cc, m.reply_to, m.date, m.size, m.seen, m.flagged, m.answered,
-                m.code, m.snoozed_until, m.body_fetched, m.body_text, m.body_html, m.attachments, f.role AS folder_role, f.name AS folder_name
+                m.code, m.snoozed_until, m.thread_id, m.links, m.body_fetched, m.body_text, m.body_html, m.attachments, f.role AS folder_role, f.name AS folder_name
          FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.id = ? AND m.user_id = ?`,
         [req.params.id, req.user.id],
       );
@@ -220,8 +259,20 @@ export async function mailRoutes(app: FastifyInstance) {
       .send(att.content);
   });
 
+  app.get<{ Params: { id: string } }>('/api/threads/:id', (req) =>
+    query(
+      `SELECT ${LIST_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder_id
+       WHERE m.user_id = ? AND m.thread_id = ? AND (f.role IS NULL OR f.role NOT IN ('trash', 'junk'))
+       ORDER BY m.date, m.id LIMIT 100`,
+      [req.user.id, req.params.id],
+    ),
+  );
+
   app.post('/api/messages/flags', async (req) => {
-    const body = z.object({ ids, seen: z.boolean().optional(), flagged: z.boolean().optional() }).parse(req.body);
+    const body = z
+      .object({ ids, seen: z.boolean().optional(), flagged: z.boolean().optional(), threads: z.boolean().optional() })
+      .parse(req.body);
+    if (body.threads) body.ids = await expandThreads(req.user.id, body.ids, false);
     if (body.seen !== undefined) await setFlag(req.user.id, body.ids, 'seen', body.seen);
     if (body.flagged !== undefined) await setFlag(req.user.id, body.ids, 'flagged', body.flagged);
     return { ok: true };
@@ -229,8 +280,9 @@ export async function mailRoutes(app: FastifyInstance) {
 
   app.post('/api/messages/move', async (req, reply) => {
     const body = z
-      .object({ ids, to: z.enum(['inbox', 'archive', 'trash', 'junk']).or(z.number().int()) })
+      .object({ ids, to: z.enum(['inbox', 'archive', 'trash', 'junk']).or(z.number().int()), threads: z.boolean().optional() })
       .parse(req.body);
+    if (body.threads) body.ids = await expandThreads(req.user.id, body.ids, true);
     try {
       await moveMessages(req.user.id, body.ids, body.to);
     } catch (e: any) {

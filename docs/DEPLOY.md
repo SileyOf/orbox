@@ -11,8 +11,9 @@
 | 域名 + HTTPS | 例如 `box.example.com`，由 Nginx / Caddy 反代 |
 | Telegram 机器人 | 可选。给 Orbox 单独建一个，不要和别的程序共用 Token |
 
-服务器需要能访问：你的 MySQL、各邮箱的 IMAP(993) / SMTP(465 或 587)、`api.telegram.org`、
-以及（启用 Outlook 时）`login.microsoftonline.com`。
+服务器需要能访问：你的 MySQL、各邮箱的 IMAP(993) / SMTP(465 或 587) / ManageSieve(4190)、
+启用的聊天平台（`api.telegram.org`、`open.feishu.cn`、`discord.com`、`slack.com`）、
+启用 Outlook 时的 `login.microsoftonline.com`，以及你配置的 AI 模型服务。
 
 ## 2. 建库
 
@@ -47,6 +48,10 @@ openssl rand -hex 32   # 生成 APP_SECRET
 | `TELEGRAM_BOT_TOKEN` | | 留空则不启用通知 |
 | `TELEGRAM_PROXY` | | 服务器直连不了 Telegram 时填 HTTP 代理，如 `http://127.0.0.1:7890`。日本等地区留空 |
 | `MS_CLIENT_ID` `MS_CLIENT_SECRET` | | Outlook 登录用，见第 7 节 |
+| `FEISHU_APP_ID` `FEISHU_APP_SECRET` `FEISHU_DOMAIN` | | 飞书 / Lark 机器人，见第 11 节 |
+| `DISCORD_BOT_TOKEN` | | Discord 机器人，见第 11 节 |
+| `SLACK_BOT_TOKEN` `SLACK_APP_TOKEN` | | Slack 机器人，见第 11 节 |
+| `AI_PROVIDER` `AI_BASE_URL` `AI_API_KEY` `AI_MODEL` `AI_FAST_MODEL` `AI_SHARED` | | 服务器默认 AI 模型，见第 12 节 |
 
 ## 4. 启动
 
@@ -199,6 +204,11 @@ sh orbox-upgrade-0.1.0-to-0.1.1/upgrade.sh /opt/orbox
 | 登录后立刻又掉线 | `PUBLIC_URL` 是 https 但实际用 http 访问，或反代没有传 `X-Forwarded-Proto` |
 | 网页不实时刷新，但手动刷新有新邮件 | 反代或 CDN 缓冲了 `/api/events`，见第 5 节 |
 | Outlook 授权报 `redirect_uri` 不匹配 | Entra 里填的重定向 URI 和 `PUBLIC_URL` 不一致 |
+| `[feishu]` 连不上或收不到消息 | 检查权限是否开通、事件和回调是否都选了长连接、应用版本是否已发布 |
+| 飞书按钮点了没反应 | 回调 `card.action.trigger` 没有配置成长连接模式 |
+| `[slack]` 启动失败 | App-Level Token 缺少 `connections:write`，或没开启 Socket Mode |
+| AI 提示"这个邮箱没有开启 AI" | 在邮箱账号设置里打开"允许 AI 读取" |
+| 过滤规则提示无法连接 ManageSieve | 邮件服务器没开放 4190 端口，或防火墙挡住了 |
 
 ### 数据库连不上
 
@@ -212,6 +222,96 @@ docker run --rm busybox nc -zv -w 5 数据库地址 3306
 - **数据库和 Orbox 在同一台机器**：`DB_HOST` 填 `host.docker.internal`（不要填 `127.0.0.1`，也不要填本机公网 IP）。MySQL 需要监听 docker 网桥能到达的地址（`bind-address = 0.0.0.0`，再用防火墙挡住公网），并放行来自 docker 网段的连接，例如 `ufw allow from 172.16.0.0/12 to any port 3306`。用户的来源主机要允许 `172.%`。
 - **数据库也是 Docker 容器**：把两个容器放进同一个 docker 网络，`DB_HOST` 填数据库容器名。
 
+## 11. 聊天机器人
+
+四个平台都是 Orbox 主动连出去（长轮询 / WebSocket），不需要公网回调地址。每个平台只能有一个程序使用同一个机器人凭据。
+配好后重启，网页 设置 → 聊天机器人 → 绑定，按提示把绑定码发给机器人即可。
+
+机器人里能做的事：新邮件和计划提醒；点按钮阅读全文、下载附件、查看链接、翻译、AI 摘要、标记已读、归档、转为待办；
+`/inbox` 看未读、`/today` 看今日计划、`/add` 新建计划；配置了 AI 后直接用自然语言提问。
+
+### Telegram
+
+找 @BotFather 创建机器人，把 Token 填进 `TELEGRAM_BOT_TOKEN`。
+
+### 飞书 / Lark
+
+1. 打开 [飞书开放平台](https://open.feishu.cn/app)（Lark 用 open.larksuite.com），创建**企业自建应用**。
+2. 应用能力 → 添加**机器人**。
+3. 权限管理里开通：
+   - `im:message`（获取与发送单聊、群组消息）
+   - `im:message.p2p_msg:readonly`（读取用户发给机器人的单聊消息）
+   - `im:message:send_as_bot`（以应用的身份发消息）
+   - `im:resource`（获取与上传图片或文件资源，发附件用）
+4. 把 App ID / App Secret 填进 `.env`（Lark 还要设 `FEISHU_DOMAIN=lark`），**先启动 Orbox**，日志里出现 `[feishu] … 已连接`。
+5. 事件与回调：
+   - 事件配置 → 订阅方式选**使用长连接接收事件**，添加事件 `im.message.receive_v1`（接收消息）。
+   - 回调配置 → 订阅方式选**使用长连接接收回调**，添加回调 `card.action.trigger`（卡片回传交互）。
+   - 切换成长连接时平台会检查连接是否在线，所以要先完成第 4 步。
+6. 创建版本并发布（需要企业管理员审核通过）。之后在飞书里搜索机器人，私聊发送 `绑定 绑定码`。
+
+### Discord
+
+1. 打开 [Discord Developer Portal](https://discord.com/developers/applications) → New Application → Bot → Reset Token，填进 `DISCORD_BOT_TOKEN`。
+2. 私信不需要开启任何特权 Intent。
+3. Installation 里开启 User Install（装到自己账号，最简单），或用 OAuth2 链接（scope 选 `bot`，权限勾选 Send Messages、Attach Files）把机器人拉进你的服务器。
+4. 私信机器人，发送 `绑定 绑定码`。
+
+### Slack
+
+1. 打开 [Slack API](https://api.slack.com/apps) → Create New App → From scratch。
+2. Socket Mode → 开启，生成 App-Level Token（scope `connections:write`，`xapp-` 开头）→ `SLACK_APP_TOKEN`。
+3. OAuth & Permissions → Bot Token Scopes 添加 `chat:write`、`im:history`、`im:read`、`im:write`、`files:write`。
+4. Event Subscriptions → 开启，Subscribe to bot events 添加 `message.im`。
+5. Interactivity & Shortcuts → 开启（Socket Mode 下不用填地址）。
+6. App Home → 打开 Messages Tab，并勾选允许用户在消息页发消息。
+7. Install to Workspace，把 `xoxb-` 开头的 Bot User OAuth Token 填进 `SLACK_BOT_TOKEN`。
+8. 在 Slack 里打开应用的私信，发送 `绑定 绑定码`。
+
+## 12. AI 与 MCP
+
+### 模型
+
+每个用户在 设置 → AI 里配置自己的模型：
+
+- **Claude**：接口类型选 Claude，填 Anthropic API Key，默认模型 `claude-opus-5-5`。直连官方 API 时会自动开启服务器端拒答兜底（被安全策略拒绝时自动换模型重试）。
+- **OpenAI 兼容**：OpenAI、DeepSeek、通义千问、Kimi、OpenRouter、本机 Ollama 等，填接口地址、模型名和 Key。
+- **快速模型**（可选）：只用于"只推送重要邮件"的分类，可以填更便宜的模型。
+
+管理员也可以在 `.env` 里配一个服务器默认模型，设 `AI_SHARED=true` 后没有自己配置的用户也能用（费用由服务器承担）。
+
+**隐私：**邮件内容会发给模型服务商。每个邮箱默认关闭 AI，需要在 设置 → 邮箱账号 → 编辑 里打开"允许 AI 读取这个邮箱"，
+内置助手、AI 按钮和 MCP 外部连接都只能访问打开了的邮箱。
+
+AI 生成的摘要、翻译、待办建议按邮件缓存在数据库 `ai_cache` 表里，同一封邮件不会重复调用模型。
+
+### MCP：让外部 AI 使用 Orbox
+
+设置 → AI 连接（MCP）→ 生成令牌。令牌只显示一次；不勾"允许直接发信"时，外部 AI 只能把邮件存进草稿箱。
+
+**Hermes**（`~/.hermes/config.yaml`，改完在会话里执行 `/reload-mcp`）：
+
+```yaml
+mcp_servers:
+  orbox:
+    url: "https://box.example.com/mcp"
+    headers:
+      Authorization: "Bearer ${ORBOX_TOKEN}"
+```
+
+把令牌写进 `~/.hermes/.env`：`ORBOX_TOKEN=orbox_…`。
+
+**Claude Desktop / Cursor 等**：网页生成令牌后会给出可直接复制的 JSON 配置（HTTP 传输，带 Authorization 请求头）。
+
+提供的工具：`list_accounts`、`search_mail`、`read_mail`、`mark_mail`、`archive_mail`、`list_tasks`、`create_task`、`complete_task`、`draft_email`，
+授权发信时另有 `send_email`。
+
+## 13. 服务器端过滤规则（Sieve）
+
+设置 → 邮箱账号 → 漏斗图标。规则通过 ManageSieve（默认 4190 端口，mailcow 自带）保存到邮件服务器，
+邮件到达时由服务器执行，Orbox 不在线也生效。Orbox 写的是名为 `orbox` 的脚本；第一次保存时如果已经有别的激活脚本
+（比如 SOGo 的），会用 `include` 把它带上，原有规则照常生效。Outlook（OAuth）邮箱不支持。
+
 ## 已知限制（0.1.0）
 
 - 只能单实例运行：调度器和 Telegram 长轮询都假定只有一个进程。
@@ -219,3 +319,6 @@ docker run --rm busybox nc -zv -w 5 数据库地址 3306
 - Bark / ntfy / Webhook 只能单向推送，没有操作按钮；出于安全考虑不允许填内网地址。
 - 每轮同步每个文件夹只缓存 30 封邮件的正文，老邮件的全文搜索要过一段时间才覆盖到。
 - 没有管理后台，用户管理需要直接操作数据库。
+- AI 助手的对话保存在内存里，30 分钟不用或重启后从头开始。
+- "浏览器打开原文"的链接 7 天内有效，拿到链接的人不登录也能看到那一封邮件，请勿转发。
+- 聊天机器人只处理私聊消息。

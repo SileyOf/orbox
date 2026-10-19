@@ -1,10 +1,10 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireUser } from '../auth.js';
-import { randomToken } from '../crypto.js';
 import { exec, one } from '../db.js';
 import { sendChannel } from '../notify/channels.js';
-import { botUsername, sendDigest, sendTest, telegramEnabled } from '../notify/telegram.js';
+import { digestCard } from '../bots/cards.js';
+import { bindHints, botStatus, createBindCode, linksOf, sendToUser, unbind } from '../bots/hub.js';
 import { parseQuickTask } from '../tasks/parse.js';
 import {
   completeTask, createTask, deleteTask, listTasks, reopenTask, repeatRule, skipTask, snoozeTask, updateTask,
@@ -87,31 +87,27 @@ export async function taskRoutes(app: FastifyInstance) {
     return task ?? reply.code(404).send({ error: '任务不存在' });
   });
 
-  app.get('/api/telegram', async (req) => {
-    const link = await one<{ username: string }>('SELECT username FROM tg_links WHERE user_id = ?', [req.user.id]);
-    return { enabled: telegramEnabled(), bot: botUsername(), linked: link ?? null };
+  app.get('/api/bots', async (req) => ({ platforms: botStatus(), links: await linksOf(req.user.id) }));
+
+  /** 生成绑定码，并给出每个已启用平台的绑定方式 */
+  app.post('/api/bots/code', async (req) => {
+    const code = await createBindCode(req.user.id);
+    return { code, hints: bindHints(code) };
   });
 
-  app.post('/api/telegram/link', async (req, reply) => {
-    if (!telegramEnabled()) return reply.code(400).send({ error: '服务器未配置 Telegram 机器人' });
-    const code = randomToken(16);
-    await exec('DELETE FROM tg_link_codes WHERE user_id = ? OR expires_at < UTC_TIMESTAMP()', [req.user.id]);
-    await exec('INSERT INTO tg_link_codes (code, user_id, expires_at) VALUES (?, ?, UTC_TIMESTAMP() + INTERVAL 15 MINUTE)', [
-      code,
-      req.user.id,
-    ]);
-    return { url: `https://t.me/${botUsername()}?start=${code}` };
-  });
-
-  app.delete('/api/telegram', async (req) => {
-    await exec('DELETE FROM tg_links WHERE user_id = ?', [req.user.id]);
+  app.delete<{ Params: { platform: string } }>('/api/bots/:platform', async (req) => {
+    await unbind(req.user.id, req.params.platform);
     return { ok: true };
   });
 
-  app.post('/api/telegram/test', async (req, reply) => {
+  app.post('/api/bots/test', async (req, reply) => {
     const { kind } = z.object({ kind: z.enum(['ping', 'digest']).default('ping') }).parse(req.body ?? {});
-    const sent = kind === 'digest' ? await sendDigest(req.user) : await sendTest(req.user.id);
-    return sent ? { ok: true } : reply.code(400).send({ error: '尚未绑定 Telegram' });
+    const card =
+      kind === 'digest'
+        ? await digestCard(req.user)
+        : { tone: 'info' as const, text: '✅ Orbox 通知已连通。\n直接发一句话给我就能新建计划或提问，例如：明天9点 交报告' };
+    const sent = await sendToUser(req.user.id, card);
+    return sent ? { ok: true, sent } : reply.code(400).send({ error: '还没有绑定任何聊天机器人' });
   });
 
   // 保存前先试发一条，地址填错能立刻发现

@@ -11,6 +11,10 @@ export interface UserSettings {
   mutedSenders: string[];
   codeAlways: boolean;
   channels: { bark: string; ntfy: string; webhook: string };
+  threads: boolean;
+  translateTo: string;
+  aiFilter: boolean;
+  ai: { provider: 'anthropic' | 'openai'; baseUrl: string; model: string; fastModel: string; hasKey: boolean } | null;
 }
 
 export interface User {
@@ -46,6 +50,8 @@ export interface Account {
   smtp_secure: number;
   username: string;
   auth_type: 'password' | 'oauth';
+  ai_enabled: number;
+  sieve_port?: number;
   signature: string | null;
   notify: number;
   save_sent: number;
@@ -76,6 +82,10 @@ export interface MessageItem {
   snippet: string;
   code: string | null;
   snoozed_until: string | null;
+  thread_id: string | null;
+  /** 会话视图下才有 */
+  thread_count?: number;
+  thread_unread?: number;
   folder_role: Folder['role'];
   folder_name: string;
 }
@@ -95,7 +105,39 @@ export interface MessageFull extends MessageItem {
   body_text: string | null;
   body_html: string | null;
   attachments: Attachment[];
+  links: LinkInfo[] | null;
   bodyError: string | null;
+}
+
+export type LinkKind = 'billing' | 'verify' | 'account' | 'tracking' | 'download' | 'unsubscribe' | 'other';
+
+export interface LinkInfo {
+  url: string;
+  text: string;
+  domain: string;
+  kind: LinkKind;
+  suspicious?: boolean;
+}
+
+export const LINK_LABELS: Record<LinkKind, string> = {
+  billing: '续费 / 付款',
+  verify: '验证 / 确认',
+  account: '账户 / 登录',
+  tracking: '物流',
+  download: '下载 / 查看',
+  unsubscribe: '退订',
+  other: '其他',
+};
+
+export interface TodoSuggestion {
+  title: string;
+  due: string | null;
+  notes: string;
+}
+
+export interface PendingMail {
+  id: string;
+  summary: string;
 }
 
 export interface RepeatRule {

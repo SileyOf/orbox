@@ -1,9 +1,8 @@
 import { exec, query } from '../db.js';
 import { emit } from '../events.js';
-import { one } from '../db.js';
 import { flushOutbox } from '../mail/send.js';
 import { dispatchResurfaced, dispatchTaskReminder } from '../notify/dispatch.js';
-import { runDigests } from '../notify/telegram.js';
+import { runDigests } from '../bots/hub.js';
 import { setFlag } from '../routes/mail.js';
 import type { TaskRow } from './service.js';
 
@@ -37,8 +36,7 @@ async function tick() {
     const claimed = await exec('UPDATE messages SET snoozed_until = NULL WHERE id = ? AND snoozed_until IS NOT NULL', [m.id]);
     if (!claimed.affectedRows) continue;
     await setFlag(m.user_id, [m.id], 'seen', false).catch((e) => console.error('[snooze]', e.message));
-    const account = await one<{ name: string }>('SELECT name FROM accounts WHERE id = ?', [m.account_id]);
-    await dispatchResurfaced(m.user_id, account?.name || '', m.id).catch((e) => console.error('[snooze]', e.message));
+    await dispatchResurfaced(m.user_id, m.id).catch((e) => console.error('[snooze]', e.message));
   }
 
   await flushOutbox();

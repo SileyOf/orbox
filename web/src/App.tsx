@@ -1,10 +1,11 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { CalendarCheck, Mail as MailIcon, Monitor, Moon, Settings as SettingsIcon, Sun } from 'lucide-react';
-import { createContext, useContext, useEffect } from 'react';
+import { CalendarCheck, Mail as MailIcon, Monitor, Moon, Settings as SettingsIcon, Sparkles, Sun } from 'lucide-react';
+import { createContext, useContext, useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { ApiError, api } from './api';
 import type { Account, Task, User } from './api';
 import { applyAppearance, copyText, dismissToast, toast, useToasts } from './lib';
+import { Assistant } from './components/Assistant';
 import { Login } from './pages/Login';
 import { MailPage } from './pages/Mail';
 import { Planner } from './pages/Planner';
@@ -98,6 +99,7 @@ function Shell({ user }: { user: User }) {
   const unread = (accounts || []).flatMap((a) => a.folders).filter((f) => f.role === 'inbox').reduce((n, f) => n + f.unread, 0);
   const dueNow = (tasks || []).filter((t) => t.due_at && new Date(t.due_at).getTime() <= Date.now()).length;
 
+  const [assistant, setAssistant] = useState(false);
   const { theme } = user.settings;
   const nextTheme = theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system';
   const ThemeIcon = theme === 'system' ? Monitor : theme === 'light' ? Sun : Moon;
@@ -115,6 +117,9 @@ function Shell({ user }: { user: User }) {
           <CalendarCheck size={20} />
           {dueNow > 0 && <span className="badge">{dueNow}</span>}
         </NavLink>
+        <button className={`rail-btn${assistant ? ' active' : ''}`} title="助手" onClick={() => setAssistant(!assistant)}>
+          <Sparkles size={20} />
+        </button>
         <div className="rail-spacer" />
         <button
           className="rail-btn"
@@ -135,6 +140,7 @@ function Shell({ user }: { user: User }) {
           <Route path="*" element={<Navigate to="/mail" replace />} />
         </Routes>
       </main>
+      {assistant && <Assistant onClose={() => setAssistant(false)} />}
     </div>
   );
 }
