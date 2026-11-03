@@ -1,7 +1,7 @@
 import { Bot, InlineKeyboard, InputFile } from 'grammy';
 import type { Context } from 'grammy';
 import { HttpsProxyAgent } from 'https-proxy-agent';
-import { config } from '../config.js';
+import { integration } from '../site.js';
 import { inboundAction, inboundText } from './hub.js';
 import type { Adapter, BotIO, Card } from './types.js';
 import { splitCard, spans } from './types.js';
@@ -72,14 +72,15 @@ function ioFor(ctx: Context): BotIO {
 export const telegram: Adapter = {
   platform: 'telegram',
   label: 'Telegram',
-  enabled: () => !!config.telegramToken,
+  enabled: () => !!integration('telegram').token,
   name: () => bot?.botInfo.username ?? null,
   bindHint: (code) => ({ url: `https://t.me/${bot?.botInfo.username}?start=${code}`, text: '点击链接打开机器人，按 Start 即可完成绑定' }),
 
   async start() {
     // 服务器直连不了 Telegram 时（例如在国内开发）可通过 TELEGRAM_PROXY 走 HTTP 代理
-    const agent = config.telegramProxy ? new HttpsProxyAgent(config.telegramProxy) : undefined;
-    const b = new Bot(config.telegramToken, { client: { baseFetchConfig: { agent, compress: true } } });
+    const { token, proxy } = integration('telegram');
+    const agent = proxy ? new HttpsProxyAgent(proxy) : undefined;
+    const b = new Bot(token, { client: { baseFetchConfig: { agent, compress: true } } });
     for (let delay = 5_000; ; delay = Math.min(delay * 2, 5 * 60_000)) {
       try {
         await b.init();

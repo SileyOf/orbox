@@ -1,13 +1,16 @@
 import {
-  AlarmClock, BellRing, CalendarDays, Check, ChevronLeft, ChevronRight, Hash, Mail, Pencil, Plus, Repeat, RotateCcw, Trash2,
+  AlarmClock, BellRing, CalendarDays, Check, ChevronLeft, ChevronRight, Copy, Hash, Mail, Pencil, Plus, Repeat, RotateCcw, SkipForward, Trash2,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
-import type { FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ContextMenu } from '../components/ContextMenu';
+import type { MenuItem } from '../components/ContextMenu';
+import { useSelection } from '../hooks/useSelection';
+import type { FormEvent, MouseEvent as ReactMouseEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTasks, useUser } from '../App';
 import { api } from '../api';
 import type { RepeatRule, Task, TaskInput } from '../api';
-import { dueLabel, toLocalInput, toast, toastError } from '../lib';
+import { copyText, dueLabel, toLocalInput, toast, toastError } from '../lib';
 
 const DAY = 86400_000;
 const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -85,10 +88,57 @@ export function Planner() {
   const dueToday = open.filter((t) => t.due_at && new Date(t.due_at).getTime() < todayStart + DAY).length;
   const doneToday = done.filter((t) => t.completed_at && new Date(t.completed_at).getTime() >= todayStart).length;
 
+  // 当前列表里任务的显示顺序，拖选和 Shift 连选按这个顺序计算
+  const ordered = useMemo(() => (tab === 'open' ? groups.flatMap((g) => g.tasks) : done), [tab, groups, done]);
+  const listRef = useRef<HTMLDivElement>(null);
+  const sel = useSelection(useMemo(() => ordered.map((t) => t.id), [ordered]), listRef);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  useEffect(() => sel.clear(), [tab]);
+
+  async function bulk(ids: number[], action: 'complete' | 'reopen' | 'delete' | number) {
+    try {
+      for (const id of ids) {
+        if (action === 'delete') await api(`/tasks/${id}`, { method: 'DELETE' });
+        else if (typeof action === 'number') await api(`/tasks/${id}/snooze`, { method: 'POST', body: { minutes: action } });
+        else await api(`/tasks/${id}/${action}`, { method: 'POST', body: {} });
+      }
+      sel.clear();
+      if (ids.length > 1) toast(`已处理 ${ids.length} 项`);
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  const SNOOZE: [string, number][] = [['10 分钟后', 10], ['1 小时后', 60], ['3 小时后', 180], ['明天此时', 1440]];
+
+  function taskMenu(t: Task): MenuItem[] {
+    const ids = sel.selected.has(t.id) && sel.selected.size > 1 ? [...sel.selected] : [t.id];
+    const single = ids.length === 1;
+    const isDone = t.status === 'done';
+    const items: MenuItem[] = [];
+    if (!single) items.push({ heading: true, label: `已选 ${ids.length} 项` });
+    items.push(isDone ? { label: '恢复为未完成', icon: RotateCcw, onClick: () => bulk(ids, 'reopen') } : { label: single ? '完成' : '全部完成', icon: Check, onClick: () => bulk(ids, 'complete') });
+    if (single) items.push({ label: '编辑', icon: Pencil, onClick: () => setEditing(t) });
+    if (!isDone) items.push({ label: '稍后提醒', icon: BellRing, children: SNOOZE.map(([label, m]) => ({ label, onClick: () => bulk(ids, m) })) });
+    if (single && t.repeat_rule && !isDone) items.push({ label: '跳过这一次', icon: SkipForward, onClick: () => act(`/tasks/${t.id}/skip`) });
+    if (single && t.mail_id) items.push({ label: '打开关联邮件', icon: Mail, onClick: () => navigate(`/mail?open=${t.mail_id}`) });
+    if (single) items.push({ label: '复制标题', icon: Copy, onClick: () => copyText(t.title) });
+    items.push({ separator: true }, { label: single ? '删除' : `删除 ${ids.length} 项`, icon: Trash2, danger: true, onClick: () => (single || confirm(`删除选中的 ${ids.length} 项？`)) && bulk(ids, 'delete') });
+    return items;
+  }
+
   const row = (t: Task) => (
     <TaskRow
       key={t.id}
       task={t}
+      index={ordered.indexOf(t)}
+      selected={sel.selected.has(t.id)}
+      onRowMouseDown={(e) => sel.onRowMouseDown(e, ordered.indexOf(t))}
+      onRowClick={(e) => sel.onRowClick(e, ordered.indexOf(t)) && setEditing(t)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setMenu({ x: e.clientX, y: e.clientY, items: taskMenu(t) });
+      }}
       onToggle={() => act(`/tasks/${t.id}/${t.status === 'open' ? 'complete' : 'reopen'}`)}
       onEdit={() => setEditing(t)}
       onSnooze={(minutes) => act(`/tasks/${t.id}/snooze`, { minutes }).then(() => toast('好的，稍后再提醒'))}
@@ -126,6 +176,26 @@ export function Planner() {
               ))}
             </div>
           )}
+          {sel.selected.size > 0 ? (
+            <div className="bulk card" style={{ marginBottom: 12 }}>
+              <label className="select-all" title={sel.allSelected ? '取消全选' : '全选'}><input type="checkbox" checked={sel.allSelected} onChange={sel.toggleAll} /></label>
+              <span className="small grow" style={{ paddingLeft: 6 }}>已选 {sel.selected.size} 项</span>
+              {tab === 'open' ? (
+                <button className="btn sm ghost" onClick={() => bulk([...sel.selected], 'complete')}><Check size={14} /> 完成</button>
+              ) : (
+                <button className="btn sm ghost" onClick={() => bulk([...sel.selected], 'reopen')}><RotateCcw size={14} /> 恢复</button>
+              )}
+              {tab === 'open' && <button className="btn sm ghost" onClick={() => bulk([...sel.selected], 60)}><BellRing size={14} /> 1 小时后提醒</button>}
+              <button className="btn sm ghost danger" onClick={() => confirm(`删除选中的 ${sel.selected.size} 项？`) && bulk([...sel.selected], 'delete')}><Trash2 size={14} /> 删除</button>
+              <button className="btn ghost sm" onClick={sel.clear}>取消</button>
+            </div>
+          ) : ordered.length > 0 ? (
+            <div className="row small muted" style={{ margin: '-6px 4px 6px' }}>
+              <label className="select-all" title="全选"><input type="checkbox" checked={false} onChange={sel.toggleAll} /></label>
+              按住拖动或 Shift / Ctrl 点击可多选，右键查看更多操作
+            </div>
+          ) : null}
+          <div ref={listRef} className={sel.dragging ? 'selecting-drag' : ''}>
           {tab === 'open' ? (
             <>
               {day && (
@@ -152,6 +222,7 @@ export function Planner() {
           ) : (
             <div className="empty" style={{ height: 280 }}>还没有完成的任务</div>
           )}
+          </div>
         </div>
       </div>
 
@@ -162,10 +233,11 @@ export function Planner() {
         </div>
         <Calendar month={month} setMonth={setMonth} selected={day} onSelect={(d) => setDay(day && dayKey(day) === dayKey(d) ? null : d)} busy={busyDays} />
         <div className="muted small">
-          到点会通过 Telegram 提醒，可直接点按钮完成或稍后再提醒；没处理的任务默认每 {user.settings.nagInterval || '—'} 分钟再提醒一次。
+          到点会推送到你在 设置 → 通知渠道 里开启的渠道，聊天机器人里可直接点按钮完成或稍后再提醒；没处理的任务默认每 {user.settings.nagInterval || '—'} 分钟再提醒一次。
         </div>
       </aside>
 
+      {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
       {editing && <TaskDialog task={editing === 'new' ? null : editing} defaultDay={day} defaultNag={user.settings.nagInterval} onClose={() => setEditing(null)} />}
     </div>
   );
@@ -173,6 +245,11 @@ export function Planner() {
 
 function TaskRow(props: {
   task: Task;
+  index: number;
+  selected: boolean;
+  onRowMouseDown: (e: ReactMouseEvent) => void;
+  onRowClick: (e: ReactMouseEvent) => void;
+  onContextMenu: (e: ReactMouseEvent) => void;
   onToggle: () => void;
   onEdit: () => void;
   onSnooze: (minutes: number) => void;
@@ -188,11 +265,17 @@ function TaskRow(props: {
   const snoozed = !isDone && t.next_remind_at && t.due_at && new Date(t.next_remind_at) > new Date(t.due_at) && new Date(t.next_remind_at).getTime() > Date.now();
 
   return (
-    <div className={`task${isDone ? ' done' : ''}`}>
+    <div
+      className={`task${isDone ? ' done' : ''}${props.selected ? ' selected' : ''}`}
+      data-index={props.index}
+      onMouseDown={props.onRowMouseDown}
+      onClick={props.onRowClick}
+      onContextMenu={props.onContextMenu}
+    >
       <button className={`check${isDone ? ' on' : ''}${!isDone && t.priority ? ` p${t.priority}` : ''}`} onClick={props.onToggle} title={isDone ? '恢复为未完成' : '完成'}>
         {isDone ? <Check size={14} strokeWidth={3} /> : <Check size={13} strokeWidth={3} />}
       </button>
-      <div className="task-body" onClick={props.onEdit}>
+      <div className="task-body">
         <div className="task-title">{t.title}</div>
         {t.notes && <div className="muted small" style={{ whiteSpace: 'pre-wrap', marginTop: 2 }}>{t.notes}</div>}
         <div className="task-meta">

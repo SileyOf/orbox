@@ -1,6 +1,6 @@
 import { App, LogLevel } from '@slack/bolt';
 import type { webApi } from '@slack/bolt';
-import { config } from '../config.js';
+import { integration, siteConfig } from '../site.js';
 import { inboundAction, inboundText } from './hub.js';
 import type { Adapter, BotIO, Card } from './types.js';
 import { splitCard, spans } from './types.js';
@@ -55,12 +55,12 @@ function ioFor(client: webApi.WebClient, channel: string, user?: string): BotIO 
 export const slack: Adapter = {
   platform: 'slack',
   label: 'Slack',
-  enabled: () => !!(config.slack.botToken && config.slack.appToken),
+  enabled: () => !!(integration('slack').botToken && integration('slack').appToken),
   name: () => botName,
   bindHint: (code) => ({ text: `在 Slack 里打开应用「${botName}」的私信，发送：绑定 ${code}` }),
 
   async start() {
-    const a = new App({ token: config.slack.botToken, appToken: config.slack.appToken, socketMode: true, logLevel: LogLevel.WARN });
+    const a = new App({ token: integration('slack').botToken, appToken: integration('slack').appToken, socketMode: true, logLevel: LogLevel.WARN });
     a.message(async ({ message, client }) => {
       if (message.subtype || message.channel_type !== 'im' || !('text' in message) || !message.text) return;
       await inboundText('slack', message.channel, message.text, message.user, ioFor(client, message.channel, message.user));
@@ -77,7 +77,7 @@ export const slack: Adapter = {
     await a.start();
     const auth = await a.client.auth.test();
     app = a;
-    botName = (auth.user as string) || 'Orbox';
+    botName = (auth.user as string) || siteConfig().name;
     console.log(`[slack] ${botName} 已连接`);
   },
 

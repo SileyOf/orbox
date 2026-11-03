@@ -6,6 +6,7 @@ import { sendChannel } from '../notify/channels.js';
 import { digestCard } from '../bots/cards.js';
 import { bindHints, botStatus, createBindCode, linksOf, sendToUser, unbind } from '../bots/hub.js';
 import { parseQuickTask } from '../tasks/parse.js';
+import { siteConfig } from '../site.js';
 import {
   completeTask, createTask, deleteTask, listTasks, reopenTask, repeatRule, skipTask, snoozeTask, updateTask,
 } from '../tasks/service.js';
@@ -105,7 +106,7 @@ export async function taskRoutes(app: FastifyInstance) {
     const card =
       kind === 'digest'
         ? await digestCard(req.user)
-        : { tone: 'info' as const, text: '✅ Orbox 通知已连通。\n直接发一句话给我就能新建计划或提问，例如：明天9点 交报告' };
+        : { tone: 'info' as const, text: `✅ ${siteConfig().name} 通知已连通。\n直接发一句话给我就能新建计划或提问，例如：明天9点 交报告` };
     const sent = await sendToUser(req.user.id, card);
     return sent ? { ok: true, sent } : reply.code(400).send({ error: '还没有绑定任何聊天机器人' });
   });
@@ -116,7 +117,7 @@ export async function taskRoutes(app: FastifyInstance) {
       .object({ channel: z.enum(['bark', 'ntfy', 'webhook']), target: z.string().trim().url().max(500) })
       .parse(req.body);
     try {
-      await sendChannel(body.channel, body.target, { title: 'Orbox 测试通知', body: '看到这条说明通道已连通。' });
+      await sendChannel(body.channel, body.target, { title: `${siteConfig().name} 测试通知`, body: '看到这条说明通道已连通。' });
     } catch (e: any) {
       return reply.code(400).send({ error: `发送失败：${e.message}` });
     }

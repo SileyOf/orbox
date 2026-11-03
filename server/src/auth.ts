@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { APP_VERSION, config } from './config.js';
 import { hashPassword, randomToken, sha256, verifyPassword } from './crypto.js';
 import { exec, one } from './db.js';
+import { publicSite, siteConfig } from './site.js';
 
 const COOKIE = 'orbox_sid';
 const SESSION_DAYS = 30;
@@ -28,17 +29,15 @@ export interface UserSettings {
   threads: boolean;
   /** 翻译的目标语言 */
   translateTo: string;
-  /** 只推送 AI 判定为重要的邮件（验证码、重点发件人始终推送） */
-  aiFilter: boolean;
-  ai?: {
-    provider: 'anthropic' | 'openai';
-    baseUrl: string;
-    model: string;
-    fastModel: string;
-    /** 加密存储，不会返回给前端 */
-    apiKeyEnc: string;
-  };
+  /** 只推送重要邮件（用 AI 或本地规则判断；验证码、重点发件人始终推送） */
+  importantOnly: boolean;
+  /** 每项 AI 任务用哪个模型服务、是否启用 */
+  aiTasks?: Partial<Record<string, { enabled: boolean; providerId: number | null; model: string }>>;
+  /** 每个通知渠道接收哪些事件，缺省表示全部接收 */
+  routing?: Record<string, Partial<Record<EventKind, boolean>>>;
 }
+
+export type EventKind = 'mail' | 'code' | 'task' | 'digest' | 'snooze';
 
 export const defaultSettings: UserSettings = {
   theme: 'system',
@@ -55,7 +54,7 @@ export const defaultSettings: UserSettings = {
   channels: { bark: '', ntfy: '', webhook: '' },
   threads: true,
   translateTo: '简体中文',
-  aiFilter: false,
+  importantOnly: false,
 };
 
 export interface User {
@@ -88,13 +87,9 @@ function toUser(row: any): User {
   };
 }
 
-/** 返回给前端的用户信息：去掉加密存储的 API Key，只告诉前端配置了没有 */
+/** 返回给前端的用户信息（管理员额外带上后台路径） */
 export function publicUser(u: User) {
-  const { ai, ...settings } = u.settings;
-  return {
-    ...u,
-    settings: { ...settings, ai: ai ? { provider: ai.provider, baseUrl: ai.baseUrl, model: ai.model, fastModel: ai.fastModel, hasKey: !!ai.apiKeyEnc } : null },
-  };
+  return { ...u, ...(u.isAdmin ? { adminPath: siteConfig().adminPath } : {}) };
 }
 
 export async function getUser(id: number): Promise<User | undefined> {
@@ -120,12 +115,18 @@ async function startSession(req: FastifyRequest, reply: FastifyReply, userId: nu
   });
 }
 
+export async function requireAdmin(req: FastifyRequest, reply: FastifyReply) {
+  await requireUser(req, reply);
+  if (reply.sent) return;
+  if (!req.user.isAdmin) return reply.code(403).send({ error: '需要管理员权限' });
+}
+
 export async function requireUser(req: FastifyRequest, reply: FastifyReply) {
   const token = req.cookies[COOKIE];
   if (token) {
     const row = await one(
       `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
-       WHERE s.id = ? AND s.expires_at > UTC_TIMESTAMP()`,
+       WHERE s.id = ? AND s.expires_at > UTC_TIMESTAMP() AND u.disabled = 0`,
       [sha256(token)],
     );
     if (row) {
@@ -166,7 +167,9 @@ const profilePatch = z.object({
       channels: z.object({ bark: channelUrl, ntfy: channelUrl, webhook: channelUrl }).partial(),
       threads: z.boolean(),
       translateTo: z.string().trim().min(2).max(30),
-      aiFilter: z.boolean(),
+      importantOnly: z.boolean(),
+      aiTasks: z.record(z.string(), z.object({ enabled: z.boolean(), providerId: z.number().int().nullable(), model: z.string().trim().max(100) })),
+      routing: z.record(z.string(), z.record(z.string(), z.boolean())),
     })
     .partial()
     .optional(),
@@ -174,25 +177,44 @@ const profilePatch = z.object({
 });
 
 export async function authRoutes(app: FastifyInstance) {
+  /** 登录页需要的信息：站点外观、能否注册、是否需要邀请码 */
   app.get('/api/auth/status', async () => {
     const row = await one<{ n: number }>('SELECT COUNT(*) AS n FROM users');
-    return { allowRegistration: config.allowRegistration || !row?.n, version: APP_VERSION };
+    const site = siteConfig();
+    const first = !row?.n;
+    return {
+      allowRegistration: first || site.registration !== 'closed',
+      inviteRequired: !first && site.registration === 'invite',
+      version: APP_VERSION,
+      site: publicSite(),
+    };
   });
 
   app.post('/api/auth/register', async (req, reply) => {
-    const body = credentials.extend({ name: z.string().trim().max(100).default('') }).parse(req.body);
+    const body = credentials.extend({ name: z.string().trim().max(100).default(''), invite: z.string().trim().max(20).optional() }).parse(req.body);
     const count = (await one<{ n: number }>('SELECT COUNT(*) AS n FROM users'))!.n;
+    const site = siteConfig();
     // 首个用户始终可注册并成为管理员
-    if (count > 0 && !config.allowRegistration) return reply.code(403).send({ error: '注册已关闭' });
+    if (count > 0 && site.registration === 'closed') return reply.code(403).send({ error: '注册已关闭' });
+    if (count > 0 && site.registration === 'invite') {
+      const inv = body.invite && (await one('SELECT code FROM invites WHERE code = ? AND used_by IS NULL AND (expires_at IS NULL OR expires_at > UTC_TIMESTAMP())', [body.invite.toUpperCase()]));
+      if (!inv) return reply.code(403).send({ error: '邀请码无效或已被使用' });
+    }
     if (await one('SELECT id FROM users WHERE email = ?', [body.email])) {
       return reply.code(409).send({ error: '该邮箱已注册' });
     }
-    const res = await exec('INSERT INTO users (email, name, password_hash, is_admin) VALUES (?, ?, ?, ?)', [
+    const res = await exec('INSERT INTO users (email, name, password_hash, is_admin, timezone, settings) VALUES (?, ?, ?, ?, ?, ?)', [
       body.email,
       body.name || body.email.split('@')[0],
       await hashPassword(body.password),
       count === 0 ? 1 : 0,
+      site.defaultTimezone,
+      // 新用户沿用站点的默认主题和强调色
+      JSON.stringify({ theme: site.theme, accent: site.accent }),
     ]);
+    if (count > 0 && site.registration === 'invite') {
+      await exec('UPDATE invites SET used_by = ?, used_at = UTC_TIMESTAMP() WHERE code = ?', [res.insertId, body.invite!.toUpperCase()]);
+    }
     await startSession(req, reply, res.insertId);
     return publicUser((await getUser(res.insertId))!);
   });
@@ -203,6 +225,8 @@ export async function authRoutes(app: FastifyInstance) {
     if (!row || !(await verifyPassword(body.password, row.password_hash))) {
       return reply.code(401).send({ error: '邮箱或密码错误' });
     }
+    if (row.disabled) return reply.code(403).send({ error: '这个账号已被管理员停用' });
+    await exec('UPDATE users SET last_login_at = UTC_TIMESTAMP() WHERE id = ?', [row.id]);
     await startSession(req, reply, Number(row.id));
     return publicUser(toUser(row));
   });

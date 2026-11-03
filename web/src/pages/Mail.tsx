@@ -1,17 +1,20 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { InfiniteData } from '@tanstack/react-query';
 import {
-  AlarmClock, AlertOctagon, Archive, ArrowLeft, CalendarPlus, Clock, Copy, File, KeyRound, PenSquare, Folder as FolderIcon, Forward, Inbox, Mail, MailOpen,
+  AlarmClock, AlertOctagon, Archive, ArrowLeft, AtSign, BellOff, CalendarPlus, Clock, Copy, File, FolderInput, KeyRound, MailCheck, PenSquare, Search as SearchIcon, ShieldAlert, Star as StarIcon, Folder as FolderIcon, Forward, Inbox, Mail, MailOpen,
   Menu, Paperclip, PenLine, RefreshCw, Reply, ReplyAll, Search, Send, Star, Trash2,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { useAccounts, useUser } from '../App';
+import { useAccounts, useSaveSettings, useUser } from '../App';
 import { api, folderLabel } from '../api';
-import type { Account, Folder, MessageFull, MessageItem, OutboxItem } from '../api';
+import type { Account, AiInfo, Folder, MessageFull, MessageItem, OutboxItem } from '../api';
 import { Compose, loadSavedDraft } from '../components/Compose';
 import type { Draft } from '../components/Compose';
 import { AiBar } from '../components/AiBar';
+import { ContextMenu } from '../components/ContextMenu';
+import type { MenuItem } from '../components/ContextMenu';
+import { useSelection } from '../hooks/useSelection';
 import { Conversation } from '../components/Conversation';
 import { LinksPanel } from '../components/LinksPanel';
 import { MessageBody, sanitizeMail } from '../components/MessageBody';
@@ -71,7 +74,8 @@ export function MailPage() {
   const [params, setParams] = useSearchParams();
   const { data: accounts = [], isLoading: accountsLoading } = useAccounts();
   const [compose, setCompose] = useState<Draft | null>(null);
-  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const listRef = useRef<HTMLDivElement>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [drawer, setDrawer] = useState(false);
   const [snoozeMenu, setSnoozeMenu] = useState(false);
   const outbox = useQuery({ queryKey: ['outbox'], queryFn: () => api<OutboxItem[]>('/outbox') });
@@ -100,7 +104,7 @@ export function MailPage() {
   // 搜索结果总是逐封列出，其余视图按设置折叠成会话
   const grouped = user.settings.threads && view !== 'search' && view !== 'outbox';
   const listKey = { view, folderId, accountId, q, grouped };
-  const aiConfig = useQuery({ queryKey: ['ai-config'], queryFn: () => api<{ active: boolean }>('/ai/config'), staleTime: 5 * 60_000 });
+  const ai = useQuery({ queryKey: ['ai'], queryFn: () => api<AiInfo>('/ai'), staleTime: 5 * 60_000 });
   const list = useInfiniteQuery({
     queryKey: ['messages', listKey],
     enabled: view !== 'outbox',
@@ -117,6 +121,9 @@ export function MailPage() {
     getNextPageParam: (last) => last.next,
   });
   const items = useMemo(() => list.data?.pages.flatMap((p) => p.items) ?? [], [list.data]);
+  const sel = useSelection(useMemo(() => (view === 'outbox' ? [] : items.map((m) => m.id)), [items, view]), listRef);
+  const { selected } = sel;
+  const setSelected = sel.setSelected;
 
   const message = useQuery({
     queryKey: ['message', openId],
@@ -141,7 +148,7 @@ export function MailPage() {
     await api('/messages/flags', { body: { ids, ...patch, threads } }).catch(toastError);
   }
 
-  async function move(ids: number[], to: 'archive' | 'trash' | 'junk' | 'inbox') {
+  async function move(ids: number[], to: 'archive' | 'trash' | 'junk' | 'inbox' | number) {
     // 当前打开的邮件被移走后，自动跳到列表里的下一封
     if (openId && ids.includes(openId)) {
       const rest = items.filter((m) => !ids.includes(m.id) || m.id === openId);
@@ -235,11 +242,102 @@ export function MailPage() {
     }
   }
 
+  const saveSettings = useSaveSettings();
+
+  /** 右键菜单：右键点在已选中的行上时作用于全部选中的邮件，否则只作用于这一封 */
+  function mailMenu(m: MessageItem): MenuItem[] {
+    const ids = selected.has(m.id) && selected.size > 1 ? [...selected] : [m.id];
+    const single = ids.length === 1;
+    const rows = items.filter((x) => ids.includes(x.id));
+    const sameAccount = rows.every((x) => x.account_id === m.account_id);
+    const acct = accountOf(m.account_id);
+    const full = () => qc.fetchQuery({ queryKey: ['message', m.id], queryFn: () => api<MessageFull>(`/messages/${m.id}`) });
+    const reply = (kind: 'reply' | 'replyAll' | 'forward') => full().then((f) => startCompose(kind, f)).catch(toastError);
+    const sender = m.from_addr.toLowerCase();
+    const s = user.settings;
+    const anyUnread = rows.some((x) => !x.seen || x.thread_unread);
+    const anyUnflagged = rows.some((x) => !x.flagged);
+    const inJunk = m.folder_role === 'junk';
+    const inTrashFolder = m.folder_role === 'trash';
+    const menu: MenuItem[] = [];
+    if (!single) menu.push({ heading: true, label: `已选 ${ids.length} 封` });
+    if (single) {
+      menu.push(
+        { label: '打开', icon: MailOpen, onClick: () => open(m.id) },
+        { label: '回复', icon: Reply, hint: 'R', onClick: () => reply('reply') },
+        { label: '回复全部', icon: ReplyAll, hint: 'A', onClick: () => reply('replyAll') },
+        { label: '转发', icon: Forward, hint: 'F', onClick: () => reply('forward') },
+        { separator: true },
+      );
+    }
+    menu.push(
+      anyUnread
+        ? { label: '标为已读', icon: MailCheck, onClick: () => setFlag(ids, { seen: true }, grouped) }
+        : { label: '标为未读', icon: Mail, hint: 'U', onClick: () => setFlag(ids, { seen: false }, grouped) },
+      anyUnflagged
+        ? { label: '加星标', icon: StarIcon, hint: 'S', onClick: () => setFlag(ids, { flagged: true }, grouped) }
+        : { label: '取消星标', icon: StarIcon, onClick: () => setFlag(ids, { flagged: false }, grouped) },
+      { label: '稍后处理', icon: AlarmClock, children: snoozeOptions().map((o) => ({ label: o.label, onClick: () => snooze(ids, o.at) })) },
+    );
+    if (single) {
+      menu.push({
+        label: '转为待办',
+        icon: CalendarPlus,
+        onClick: () => api(`/messages/${m.id}/task`, { body: {} }).then(() => toast('已加入待办', { action: { label: '去计划', run: () => navigate('/planner') } })).catch(toastError),
+      });
+    }
+    menu.push({ separator: true });
+    if (m.folder_role !== 'archive' && m.folder_role !== 'sent') menu.push({ label: '归档', icon: Archive, hint: 'E', onClick: () => move(ids, 'archive') });
+    if (sameAccount && acct) {
+      menu.push({
+        label: '移动到',
+        icon: FolderInput,
+        children: sortFolders(acct.folders)
+          .filter((f) => f.id !== m.folder_id)
+          .map((f) => ({ label: folderLabel(f), onClick: () => move(ids, f.id) })),
+      });
+    }
+    menu.push(
+      inJunk
+        ? { label: '不是垃圾邮件', icon: Inbox, onClick: () => move(ids, 'inbox') }
+        : { label: '标为垃圾邮件', icon: ShieldAlert, onClick: () => move(ids, 'junk') },
+      { label: inTrashFolder ? '彻底删除' : '删除', icon: Trash2, danger: true, hint: '#', onClick: () => move(ids, 'trash') },
+    );
+    if (single) {
+      menu.push({ separator: true });
+      if (m.code) menu.push({ label: `复制验证码 ${m.code}`, icon: KeyRound, onClick: () => copyText(m.code!) });
+      menu.push(
+        { label: '复制发件人地址', icon: AtSign, onClick: () => copyText(m.from_addr) },
+        { label: '这个发件人的所有邮件', icon: SearchIcon, onClick: () => go({ v: 'search', q: m.from_addr }) },
+        s.vipSenders.includes(sender)
+          ? { label: '取消重点发件人', icon: StarIcon, onClick: () => saveSettings({ settings: { vipSenders: s.vipSenders.filter((x) => x !== sender) } }).then(() => toast('已取消')) }
+          : { label: '设为重点发件人', icon: StarIcon, onClick: () => saveSettings({ settings: { vipSenders: [...s.vipSenders, sender] } }).then(() => toast('以后这个发件人的邮件始终通知')) },
+        s.mutedSenders.includes(sender)
+          ? { label: '恢复这个发件人的通知', icon: BellOff, onClick: () => saveSettings({ settings: { mutedSenders: s.mutedSenders.filter((x) => x !== sender) } }).then(() => toast('已恢复通知')) }
+          : { label: '不再推送这个发件人', icon: BellOff, onClick: () => saveSettings({ settings: { mutedSenders: [...s.mutedSenders, sender] } }).then(() => toast('邮件照常接收，但不再推送')) },
+      );
+    }
+    return menu;
+  }
+
   // 键盘快捷键：j/k 上下，e 归档，# 删除，s 星标，u 未读，r 回复，c 写信，/ 搜索
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement;
-      if (e.metaKey || e.ctrlKey || e.altKey || el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+      if (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+      // Ctrl/⌘ + A 全选当前列表；有选中时 Delete 删除、Esc 取消
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a' && view !== 'outbox') {
+        e.preventDefault();
+        sel.setSelected(new Set(items.map((m) => m.id)));
+        return;
+      }
+      if (selected.size && (e.key === 'Delete' || e.key === 'Backspace')) {
+        e.preventDefault();
+        move([...selected], 'trash');
+        return;
+      }
+      if (selected.size && e.key === 'Escape') return sel.clear();
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       const i = items.findIndex((m) => m.id === openId);
       const actions: Record<string, () => void> = {
         j: () => open((items[i + 1] || items[i] || items[0])?.id),
@@ -311,7 +409,7 @@ export function MailPage() {
                 key={f.id}
                 icon={(f.role && ROLE_ICONS[f.role]) || FolderIcon}
                 label={folderLabel(f)}
-                count={f.role === 'sent' || f.role === 'trash' || f.role === 'archive' ? 0 : f.unread}
+                count={f.role === 'sent' || f.role === 'trash' || f.role === 'archive' || f.role === 'junk' ? 0 : f.unread}
                 active={view === 'folder' && folderId === f.id}
                 onClick={() => go({ v: 'folder', f: f.id })}
               />
@@ -321,7 +419,7 @@ export function MailPage() {
         {!accounts.length && !accountsLoading && (
           <div className="muted small" style={{ padding: 12 }}>
             还没有邮箱。
-            <a href="/settings" onClick={(e) => (e.preventDefault(), navigate('/settings'))}>
+            <a href="/settings/mailboxes" onClick={(e) => (e.preventDefault(), navigate('/settings/mailboxes'))}>
               去添加
             </a>
           </div>
@@ -346,7 +444,9 @@ export function MailPage() {
         </div>
         {selected.size ? (
           <div className="bulk">
-            <span className="small grow" style={{ paddingLeft: 6 }}>已选 {selected.size} 封</span>
+            <label className="select-all" title={sel.allSelected ? '取消全选' : '全选'}><input type="checkbox" checked={sel.allSelected} onChange={sel.toggleAll} /></label>
+            <span className="small grow" style={{ paddingLeft: 6 }}>已选 {selected.size} 封{list.hasNextPage ? '（已加载的）' : ''}</span>
+            <button className="icon-btn" title="加星标" onClick={() => setFlag(selectedIds, { flagged: true }, grouped)}><Star size={17} /></button>
             <button className="icon-btn" title="标为已读" onClick={() => (setFlag(selectedIds, { seen: true }, grouped), setSelected(new Set()))}><MailOpen size={17} /></button>
             <button className="icon-btn" title="标为未读" onClick={() => (setFlag(selectedIds, { seen: false }, grouped), setSelected(new Set()))}><Mail size={17} /></button>
             <button className="icon-btn" title="归档" onClick={() => move(selectedIds, 'archive')}><Archive size={17} /></button>
@@ -355,12 +455,16 @@ export function MailPage() {
           </div>
         ) : (
           <div className="list-title">
+            {view !== 'outbox' && items.length > 0 && (
+              <label className="select-all" title="全选（Ctrl/⌘ + A）"><input type="checkbox" checked={false} onChange={sel.toggleAll} /></label>
+            )}
             <h2>{title}</h2>
             <span className="muted small">{scope}</span>
           </div>
         )}
         <div
-          className="list-scroll"
+          ref={listRef}
+          className={`list-scroll${sel.dragging ? ' selecting-drag' : ''}`}
           onScroll={(e) => {
             const el = e.currentTarget;
             if (el.scrollHeight - el.scrollTop - el.clientHeight < 400 && list.hasNextPage && !list.isFetchingNextPage) list.fetchNextPage();
@@ -387,20 +491,26 @@ export function MailPage() {
                 </div>
               </div>
             ))}
-          {view !== 'outbox' && items.map((m) => {
+          {view !== 'outbox' && items.map((m, index) => {
             const outgoing = m.folder_role === 'sent' || m.folder_role === 'drafts';
             return (
-              <div key={m.id} className={`msg${m.seen && !m.thread_unread ? '' : ' unread'}${m.id === openId ? ' active' : ''}`} onClick={() => open(m.id)}>
+              <div
+                key={m.id}
+                data-index={index}
+                className={`msg${m.seen && !m.thread_unread ? '' : ' unread'}${m.id === openId ? ' active' : ''}${selected.has(m.id) ? ' selected' : ''}`}
+                onMouseDown={(e) => sel.onRowMouseDown(e, index)}
+                onClick={(e) => sel.onRowClick(e, index) && open(m.id)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setMenu({ x: e.clientX, y: e.clientY, items: mailMenu(m) });
+                }}
+              >
                 {accounts.length > 1 && <span className="msg-bar" style={{ background: accountOf(m.account_id)?.color }} />}
                 <label className="msg-mark" onClick={(e) => e.stopPropagation()}>
                   <input
                     type="checkbox"
                     checked={selected.has(m.id)}
-                    onChange={() => {
-                      const next = new Set(selected);
-                      next.has(m.id) ? next.delete(m.id) : next.add(m.id);
-                      setSelected(next);
-                    }}
+                    onChange={() => sel.toggle(m.id)}
                   />
                   {!m.seen && <span className="dot" />}
                 </label>
@@ -513,8 +623,8 @@ export function MailPage() {
                     <Copy size={15} /> 复制
                   </button>
                 )}
-                {aiConfig.data?.active && accountOf(current.account_id)?.ai_enabled ? (
-                  <AiBar key={current.id} message={current} translateTo={user.settings.translateTo} onReply={(text) => startCompose('reply', current, text)} />
+                {ai.data && accountOf(current.account_id)?.ai_enabled ? (
+                  <AiBar key={current.id} message={current} active={ai.data.active} translateTo={user.settings.translateTo} onReply={(text) => startCompose('reply', current, text)} />
                 ) : null}
                 <LinksPanel links={current.links} />
                 <MessageBody key={`${current.id}-${user.settings.theme}`} message={current} blockRemote={user.settings.blockRemoteImages} />
@@ -549,6 +659,7 @@ export function MailPage() {
         )}
       </section>
 
+      {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
       {compose && (
         <Compose
           key={`${compose.replyTo}-${compose.forwardOf}-${compose.html.length}`}

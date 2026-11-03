@@ -1,10 +1,11 @@
 import { randomInt } from 'node:crypto';
 import { DateTime } from 'luxon';
 import { getUser } from '../auth.js';
-import type { User } from '../auth.js';
+import type { EventKind, User } from '../auth.js';
 import { exec, one, query } from '../db.js';
 import { handleAction, handleText } from './actions.js';
-import { HELP, digestCard } from './cards.js';
+import { digestCard, helpText } from './cards.js';
+import { siteConfig } from '../site.js';
 import { discord } from './discord.js';
 import { feishu } from './feishu.js';
 import { slack } from './slack.js';
@@ -26,6 +27,14 @@ export async function startBots() {
   }
 }
 
+/** 管理员在网页里改了某个平台的凭据后，单独重启它 */
+export async function restartBot(platform: Platform): Promise<void> {
+  const a = adapterOf(platform);
+  if (!a) return;
+  await a.stop().catch(() => {});
+  if (a.enabled()) await a.start();
+}
+
 export async function stopBots() {
   await Promise.all(adapters().filter((a) => a.enabled()).map((a) => a.stop().catch(() => {})));
 }
@@ -37,12 +46,17 @@ export function botStatus() {
 export const linksOf = (userId: number) =>
   query<{ platform: Platform; chat_id: string; username: string }>('SELECT platform, chat_id, username FROM bot_links WHERE user_id = ?', [userId]);
 
-/** 发给用户绑定的所有平台。返回成功送达的平台数 */
-export async function sendToUser(userId: number, cards: Card | Card[]): Promise<number> {
+/** 用户是否让这个渠道接收这类事件（没设置过就是接收） */
+export const wants = (user: User | undefined, channel: string, kind?: EventKind) =>
+  !kind || user?.settings.routing?.[channel]?.[kind] !== false;
+
+/** 发给用户绑定的所有平台（按用户的渠道设置筛选事件）。返回成功送达的平台数 */
+export async function sendToUser(userId: number, cards: Card | Card[], kind?: EventKind): Promise<number> {
   let sent = 0;
+  const user = kind ? await getUser(userId) : undefined;
   for (const link of await linksOf(userId)) {
     const a = adapterOf(link.platform);
-    if (!a?.enabled() || !a.name()) continue;
+    if (!a?.enabled() || !a.name() || !wants(user, link.platform, kind)) continue;
     try {
       for (const c of Array.isArray(cards) ? cards : [cards]) await a.send(link.chat_id, c);
       sent++;
@@ -78,13 +92,13 @@ async function tryBind(platform: Platform, chatId: string, text: string, usernam
   if (!code) return false;
   const row = await one<{ user_id: number }>('SELECT user_id FROM bot_link_codes WHERE code = ? AND expires_at > UTC_TIMESTAMP()', [code]);
   if (!row) {
-    await io.reply({ tone: 'warn', text: '绑定码无效或已过期，请回到 Orbox 网页重新生成。' });
+    await io.reply({ tone: 'warn', text: `绑定码无效或已过期，请回到 ${siteConfig().name} 网页重新生成。` });
     return true;
   }
   await exec('DELETE FROM bot_link_codes WHERE user_id = ?', [row.user_id]);
   await exec('DELETE FROM bot_links WHERE (platform = ? AND chat_id = ?) OR (platform = ? AND user_id = ?)', [platform, chatId, platform, row.user_id]);
   await exec('INSERT INTO bot_links (user_id, platform, chat_id, username) VALUES (?, ?, ?, ?)', [row.user_id, platform, chatId, username.slice(0, 100)]);
-  await io.reply({ tone: 'info', title: '绑定成功 🎉', text: HELP });
+  await io.reply({ tone: 'info', title: '绑定成功 🎉', text: helpText() });
   return true;
 }
 
@@ -93,13 +107,14 @@ async function userOfChat(platform: Platform, chatId: string): Promise<User | un
   return row ? getUser(Number(row.user_id)) : undefined;
 }
 
-const NOT_LINKED = '尚未绑定 Orbox 账号。请在 Orbox 网页「设置 → 聊天机器人」里生成绑定码，再把绑定码发给我。';
+const notLinked = () =>
+  `尚未绑定 ${siteConfig().name} 账号。请在网页「设置 → 通知渠道」里生成绑定码，再把绑定码发给我。`;
 
 /** 适配器收到文字消息时调用 */
 export async function inboundText(platform: Platform, chatId: string, text: string, username: string, io: BotIO) {
   if (await tryBind(platform, chatId, text, username, io)) return;
   const user = await userOfChat(platform, chatId);
-  if (!user) return io.reply({ tone: 'info', text: NOT_LINKED });
+  if (!user) return io.reply({ tone: 'info', text: notLinked() });
   if (/^\/unlink\b|^解除绑定$/.test(text.trim())) {
     await unbind(user.id, platform);
     return io.reply({ tone: 'info', text: '已解除绑定，之后不会再收到通知。' });
@@ -110,7 +125,7 @@ export async function inboundText(platform: Platform, chatId: string, text: stri
 /** 适配器收到按钮点击时调用 */
 export async function inboundAction(platform: Platform, chatId: string, action: string, io: BotIO) {
   const user = await userOfChat(platform, chatId);
-  if (!user) return io.note(NOT_LINKED);
+  if (!user) return io.note(notLinked());
   await handleAction(user, platform, action, io);
 }
 
@@ -130,6 +145,6 @@ export async function runDigests(): Promise<void> {
     const sinceDue = now.diff(now.set({ hour: h, minute: m, second: 0 }), 'minutes').minutes;
     if (sinceDue < 0 || sinceDue > 60) continue;
     await exec('UPDATE users SET digest_last = ? WHERE id = ?', [today, user.id]);
-    await sendToUser(user.id, await digestCard(user)).catch((e) => console.error('[digest]', e.message));
+    await sendToUser(user.id, await digestCard(user), 'digest').catch((e) => console.error('[digest]', e.message));
   }
 }

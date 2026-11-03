@@ -11,6 +11,8 @@ import { config } from './config.js';
 import { pool } from './db.js';
 import { setNewMailHandler, startAllAccounts, stopAllAccounts } from './mail/manager.js';
 import { migrate } from './migrate.js';
+import { loadSite } from './site.js';
+import { migrateLegacyAi } from './ai/tasks.js';
 import { dispatchNewMail } from './notify/dispatch.js';
 import { startBots, stopBots } from './bots/hub.js';
 import { accountRoutes } from './routes/accounts.js';
@@ -19,6 +21,7 @@ import { taskRoutes } from './routes/tasks.js';
 import { aiRoutes } from './routes/ai.js';
 import { mcpRoutes } from './routes/mcp.js';
 import { publicRoutes } from './routes/public.js';
+import { adminRoutes, siteRoutes } from './routes/admin.js';
 import { startScheduler } from './tasks/scheduler.js';
 
 const app = Fastify({ logger: { level: 'warn' }, bodyLimit: 10 * 1024 * 1024, trustProxy: true, forceCloseConnections: true });
@@ -41,6 +44,8 @@ await app.register(taskRoutes);
 await app.register(aiRoutes);
 await app.register(mcpRoutes);
 await app.register(publicRoutes);
+await app.register(adminRoutes);
+await app.register(siteRoutes);
 
 // 生产环境由同一个进程托管前端构建产物
 const webDist = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
@@ -73,6 +78,8 @@ for (;;) {
   }
 }
 await migrate();
+await loadSite();
+await migrateLegacyAi();
 void startBots();
 setNewMailHandler(dispatchNewMail);
 await startAllAccounts();

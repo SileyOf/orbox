@@ -1,6 +1,6 @@
 import { Domain, LoggerLevel, createLarkChannel } from '@larksuiteoapi/node-sdk';
 import type { LarkChannel } from '@larksuiteoapi/node-sdk';
-import { config } from '../config.js';
+import { integration, siteConfig } from '../site.js';
 import { inboundAction, inboundText } from './hub.js';
 import type { Adapter, BotIO, Button, Card } from './types.js';
 import { splitCard } from './types.js';
@@ -64,16 +64,19 @@ function ioFor(chatId: string): BotIO {
 
 export const feishu: Adapter = {
   platform: 'feishu',
-  label: config.feishu.domain === 'lark' ? 'Lark' : '飞书',
-  enabled: () => !!(config.feishu.appId && config.feishu.appSecret),
+  get label() {
+    return integration('feishu').domain === 'lark' ? 'Lark' : '飞书';
+  },
+  enabled: () => !!(integration('feishu').appId && integration('feishu').appSecret),
   name: () => botName,
-  bindHint: (code) => ({ text: `在${config.feishu.domain === 'lark' ? ' Lark' : '飞书'}里搜索机器人「${botName}」，私聊发送：绑定 ${code}` }),
+  bindHint: (code) => ({ text: `在${feishu.label}里搜索机器人「${botName}」，私聊发送：绑定 ${code}` }),
 
   async start() {
+    const cfg = integration('feishu');
     const ch = createLarkChannel({
-      appId: config.feishu.appId,
-      appSecret: config.feishu.appSecret,
-      domain: config.feishu.domain === 'lark' ? Domain.Lark : Domain.Feishu,
+      appId: cfg.appId,
+      appSecret: cfg.appSecret,
+      domain: cfg.domain === 'lark' ? Domain.Lark : Domain.Feishu,
       loggerLevel: LoggerLevel.warn,
       source: 'orbox',
       // 只处理单聊；群里需要 @ 机器人
@@ -91,7 +94,7 @@ export const feishu: Adapter = {
     ch.on('error', (err) => console.error('[feishu]', err.code, err.message));
     await ch.connect();
     channel = ch;
-    botName = ch.botIdentity?.name || 'Orbox';
+    botName = ch.botIdentity?.name || siteConfig().name;
     console.log(`[feishu] ${botName} 已连接`);
   },
 

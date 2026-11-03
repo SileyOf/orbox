@@ -378,6 +378,53 @@ h1, h2, h3 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 
 .tag { cursor: pointer; }
 
+.auth { flex-direction: column; gap: 12px; }
+.auth-footer { text-align: center; }
+
+/* 设置和后台：左侧分区导航 */
+.settings-layout { display: grid; grid-template-columns: 220px 1fr; grid-template-rows: minmax(0, 1fr); height: 100%; }
+.settings-nav { display: flex; flex-direction: column; gap: 2px; padding: 24px 12px; border-right: 1px solid var(--line); overflow-y: auto; }
+.settings-nav h1 { font-size: 20px; padding: 0 10px 14px; }
+.settings-nav .side-item { text-decoration: none; }
+.settings-nav .admin-link { margin-top: auto; color: var(--muted); }
+.settings-nav .admin-link svg { color: var(--muted); }
+.channel { display: grid; gap: 4px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.channel:last-child { border-bottom: 0; }
+.event-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.event-chips .chip { border: 0; cursor: pointer; }
+.task-route { display: flex; align-items: center; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.task-route:last-child { border-bottom: 0; }
+.switch.off { opacity: .45; pointer-events: none; }
+.steps { margin: 0; padding-left: 20px; display: grid; gap: 6px; line-height: 1.6; }
+.steps code, .setting code { font: 12.5px ui-monospace, Menlo, monospace; background: var(--soft); padding: 1px 6px; border-radius: 5px; }
+.qr-box { display: flex; gap: 14px; align-items: center; padding: 12px; border-radius: 12px; background: var(--soft); }
+.qr-box img { width: 160px; height: 160px; border-radius: 8px; background: #fff; flex: none; }
+.stat4 { grid-template-columns: repeat(4, 1fr); }
+
+/* 右键菜单 */
+.ctx-menu { position: fixed; z-index: 80; min-width: 200px; max-width: 280px; padding: 5px; box-shadow: var(--shadow); user-select: none; }
+.ctx-row { position: relative; }
+.ctx-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; height: 32px; padding: 0 10px 0 6px; border: 0; border-radius: 7px;
+  background: none; color: var(--ink); text-align: left; cursor: pointer; white-space: nowrap; font-size: 13.5px;
+}
+.ctx-item:hover:not(:disabled), .ctx-row:hover > .ctx-item:not(:disabled) { background: var(--soft); }
+.ctx-item:disabled { opacity: .4; cursor: default; }
+.ctx-item.danger { color: var(--danger); }
+.ctx-icon { width: 20px; display: grid; place-items: center; color: var(--muted); }
+.ctx-item.danger .ctx-icon { color: var(--danger); }
+.ctx-hint { color: var(--muted); font-size: 12px; }
+.ctx-sep { height: 1px; margin: 4px 6px; background: var(--line); }
+.ctx-heading { padding: 6px 10px 4px; font-size: 12px; color: var(--muted); }
+.ctx-sub { position: absolute; top: -5px; }
+.ctx-sub.right { left: 100%; }
+.ctx-sub.left { right: 100%; }
+.selecting-drag, .selecting-drag * { user-select: none; cursor: default; }
+.msg.selected, .task.selected { background: color-mix(in oklab, var(--accent) 22%, var(--panel)); }
+.msg.selected:hover, .task.selected:hover { background: color-mix(in oklab, var(--accent) 28%, var(--panel)); }
+.select-all { display: grid; place-items: center; width: 22px; }
+.select-all input { width: 15px; height: 15px; accent-color: var(--primary); cursor: pointer; margin: 0; }
+
 .bind-code { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-radius: 12px; background: var(--accent-soft); }
 .bind-code b { font: 700 26px/1 ui-monospace, Menlo, monospace; letter-spacing: .18em; flex: 1; }
 .code-block { margin: 0; padding: 12px 14px; border-radius: 10px; background: var(--soft); font: 12.5px/1.55 ui-monospace, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow-y: auto; }
@@ -448,6 +495,13 @@ h1, h2, h3 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
   .planner { grid-template-columns: 1fr; }
   .planner-aside { display: none; }
   .planner-main, .settings { padding: 18px 14px 48px; }
+  .settings-layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .settings-nav { flex-direction: row; overflow-x: auto; padding: 10px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .settings-nav h1 { display: none; }
+  .settings-nav .side-item { width: auto; flex: none; }
+  .settings-nav .admin-link { margin-top: 0; }
+  .task-route { flex-wrap: wrap; }
+  .stat4 { grid-template-columns: 1fr 1fr; }
   .task-actions { opacity: 1; }
   .grid2 { grid-template-columns: 1fr; }
   .toasts { bottom: 76px; }

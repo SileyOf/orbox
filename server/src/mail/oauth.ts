@@ -1,4 +1,5 @@
 import { config } from '../config.js';
+import { integration } from '../site.js';
 import { decrypt, encrypt } from '../crypto.js';
 import { exec } from '../db.js';
 
@@ -15,12 +16,12 @@ const SCOPES = [
 /** 个人版 outlook.com / hotmail 账号所在的固定租户 */
 const CONSUMER_TENANT = '9188040d-6c67-4c5b-b112-36a304b66dad';
 
-export const microsoftEnabled = () => !!(config.microsoft.clientId && config.microsoft.clientSecret);
+export const microsoftEnabled = () => !!(integration('microsoft').clientId && integration('microsoft').clientSecret);
 export const microsoftRedirectUri = () => `${config.publicUrl}/api/oauth/microsoft/callback`;
 
 export function microsoftAuthUrl(state: string, loginHint?: string): string {
   const p = new URLSearchParams({
-    client_id: config.microsoft.clientId,
+    client_id: integration('microsoft').clientId,
     response_type: 'code',
     redirect_uri: microsoftRedirectUri(),
     response_mode: 'query',
@@ -44,8 +45,8 @@ async function tokenRequest(params: Record<string, string>): Promise<TokenRespon
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      client_id: config.microsoft.clientId,
-      client_secret: config.microsoft.clientSecret,
+      client_id: integration('microsoft').clientId,
+      client_secret: integration('microsoft').clientSecret,
       scope: SCOPES,
       ...params,
     }),

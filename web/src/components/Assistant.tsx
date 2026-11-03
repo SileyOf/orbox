@@ -61,7 +61,7 @@ export function Assistant({ onClose }: { onClose: () => void }) {
       setTurns((t) => [...t, { role: 'assistant', text: r.text, pending: r.pending }]);
     } catch (e: any) {
       setTurns((t) => [...t, { role: 'assistant', text: `⚠️ ${e.message}` }]);
-      if (/还没有配置/.test(e.message)) toast('先在设置里配置 AI 模型', { action: { label: '去设置', run: () => navigate('/settings#ai') } });
+      if (/还没有配置/.test(e.message)) toast('先在设置里配置 AI 模型', { action: { label: '去设置', run: () => navigate('/settings/ai') } });
     } finally {
       setBusy(false);
     }

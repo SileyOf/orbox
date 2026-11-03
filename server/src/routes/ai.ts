@@ -1,13 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { getUser, publicUser, requireUser } from '../auth.js';
+import { requireUser } from '../auth.js';
 import { askAssistant, resetSession } from '../ai/agent.js';
 import { draftReply, extractTodos, summarize, translate } from '../ai/features.js';
-import { AiError, DEFAULT_MODEL, aiConfigOf, complete } from '../ai/provider.js';
-import type { AiConfig } from '../ai/provider.js';
+import { AiError, complete, listModels } from '../ai/provider.js';
+import { TASKS, TASK_NAMES, providerInput, providerTarget, providersOf, publicProvider, saveProvider, taskSettingSchema, taskSettings } from '../ai/tasks.js';
+import { siteConfig } from '../site.js';
 import { takePending } from '../ai/tools.js';
 import { config } from '../config.js';
-import { encrypt, randomToken, sha256 } from '../crypto.js';
+import { randomToken, sha256 } from '../crypto.js';
 import { exec, query } from '../db.js';
 import { sendMail } from '../mail/send.js';
 
@@ -24,46 +25,74 @@ export async function aiRoutes(app: FastifyInstance) {
     return reply.code(500).send({ error: err.message || '服务器内部错误' });
   });
 
-  app.get('/api/ai/config', async (req) => ({
-    ...publicUser(req.user).settings.ai,
-    defaults: DEFAULT_MODEL,
-    // 管理员开放了服务器默认模型时，用户不填也能用
-    shared: config.ai.shared && !!config.ai.apiKey ? { provider: config.ai.provider, model: config.ai.model } : null,
-    active: !!aiConfigOf(req.user),
-  }));
-
-  app.put('/api/ai/config', async (req) => {
-    const body = z
-      .object({
-        provider: z.enum(['anthropic', 'openai']),
-        baseUrl: z.string().trim().max(300).refine((v) => v === '' || /^https?:\/\//.test(v), '接口地址必须以 http:// 或 https:// 开头'),
-        model: z.string().trim().max(100),
-        fastModel: z.string().trim().max(100).default(''),
-        /** 留空表示沿用已保存的 Key */
-        apiKey: z.string().trim().max(500).optional(),
-      })
-      .parse(req.body);
-    const prev = req.user.settings.ai;
-    const apiKeyEnc = body.apiKey ? encrypt(body.apiKey) : prev?.provider === body.provider ? prev.apiKeyEnc : '';
-    if (!apiKeyEnc) throw new AiError('请填写 API Key');
-    const ai = { provider: body.provider, baseUrl: body.baseUrl, model: body.model, fastModel: body.fastModel, apiKeyEnc };
-    await exec('UPDATE users SET settings = ? WHERE id = ?', [JSON.stringify({ ...req.user.settings, ai }), req.user.id]);
-    return publicUser((await getUser(req.user.id))!);
+  /** AI 设置页需要的全部信息：模型服务、任务分配、每项任务的说明 */
+  app.get('/api/ai', async (req) => {
+    const providers = await providersOf(req.user);
+    const tasks = await taskSettings(req.user);
+    return {
+      providers: providers.map(publicProvider),
+      tasks,
+      meta: TASKS,
+      // 前端据此决定显示哪些 AI 按钮
+      active: Object.fromEntries(TASK_NAMES.map((t) => [t, tasks[t].enabled && !!tasks[t].providerId])),
+      shareAi: siteConfig().shareAi,
+    };
   });
 
-  app.delete('/api/ai/config', async (req) => {
-    const { ai: _drop, ...rest } = req.user.settings;
-    await exec('UPDATE users SET settings = ? WHERE id = ?', [JSON.stringify(rest), req.user.id]);
-    return publicUser((await getUser(req.user.id))!);
+  app.post('/api/ai/providers', async (req) => ({ id: await saveProvider(req.user.id, null, providerInput.parse(req.body)) }));
+
+  app.put<IdParams>('/api/ai/providers/:id', async (req) => ({ id: await saveProvider(req.user.id, Number(req.params.id), providerInput.parse(req.body)) }));
+
+  app.delete<IdParams>('/api/ai/providers/:id', async (req) => {
+    await exec('DELETE FROM ai_providers WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+    return { ok: true };
   });
 
-  /** 用一个极短的请求验证模型配置能不能用 */
-  app.post('/api/ai/test', async (req) => {
-    const cfg: AiConfig | null = aiConfigOf(req.user);
-    if (!cfg) throw new AiError('还没有配置 AI 模型');
+  /** 测试一个模型服务：可以是还没保存的（带 apiKey），也可以是已保存的（带 id，Key 用保存的） */
+  app.post('/api/ai/providers/test', async (req) => {
+    const body = providerInput.partial({ name: true }).extend({ id: z.number().int().optional() }).parse(req.body);
+    let target;
+    if (body.id && !body.apiKey) {
+      const p = (await providersOf(req.user)).find((x) => x.id === body.id);
+      if (!p) throw new AiError('模型服务不存在');
+      target = { ...providerTarget(p, req.user.id, body.defaultModel), kind: body.kind, baseUrl: body.baseUrl };
+    } else {
+      target = { kind: body.kind, baseUrl: body.baseUrl, apiKey: body.apiKey || 'none', model: body.defaultModel, userId: req.user.id, task: 'test' };
+    }
     const started = Date.now();
-    const text = await complete(cfg, { system: '只回答"好"。', prompt: '测试连接，请回答：好', maxTokens: 200 });
-    return { ok: true, model: cfg.model, reply: text.slice(0, 50), ms: Date.now() - started };
+    const reply = await complete(target, { system: '只回答"好"。', prompt: '测试连接，请回答：好', maxTokens: 300 });
+    return { ok: true, reply: reply.replace(/<think>[\s\S]*?<\/think>/g, '').trim().slice(0, 40), ms: Date.now() - started };
+  });
+
+  /** 拉取服务上的模型列表并缓存，供下拉选择 */
+  app.post<IdParams>('/api/ai/providers/:id/models', async (req) => {
+    const p = (await providersOf(req.user)).find((x) => x.id === Number(req.params.id));
+    if (!p) throw new AiError('模型服务不存在');
+    const models = await listModels(providerTarget(p, req.user.id));
+    if (p.user_id !== null || req.user.isAdmin) await exec('UPDATE ai_providers SET models = ? WHERE id = ?', [JSON.stringify(models.slice(0, 500)), p.id]);
+    return { models };
+  });
+
+  app.put('/api/ai/tasks', async (req) => {
+    const body = z.object({ tasks: z.record(z.string(), taskSettingSchema) }).parse(req.body);
+    const providers = await providersOf(req.user);
+    const tasks = Object.fromEntries(
+      Object.entries(body.tasks)
+        .filter(([t]) => (TASK_NAMES as string[]).includes(t))
+        .map(([t, v]) => [t, { ...v, providerId: providers.some((p) => p.id === v.providerId) ? v.providerId : null }]),
+    );
+    await exec('UPDATE users SET settings = ? WHERE id = ?', [JSON.stringify({ ...req.user.settings, aiTasks: tasks }), req.user.id]);
+    return { ok: true };
+  });
+
+  /** 最近一段时间每项任务、每个模型的调用次数和 token 用量 */
+  app.get('/api/ai/usage', async (req) => {
+    const { days } = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(req.query);
+    return query(
+      `SELECT task, model, SUM(calls) AS calls, SUM(failures) AS failures, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens
+       FROM ai_usage WHERE user_id = ? AND day >= UTC_DATE() - INTERVAL ? DAY GROUP BY task, model ORDER BY calls DESC`,
+      [req.user.id, days],
+    );
   });
 
   app.post<IdParams>('/api/messages/:id/ai/summary', async (req) => {

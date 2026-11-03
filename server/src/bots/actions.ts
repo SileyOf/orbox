@@ -1,7 +1,7 @@
 import type { User } from '../auth.js';
 import { askAssistant, resetSession } from '../ai/agent.js';
 import { summarize, translate } from '../ai/features.js';
-import { aiConfigOf } from '../ai/provider.js';
+import { resolveTask } from '../ai/tasks.js';
 import { takePending } from '../ai/tools.js';
 import { one } from '../db.js';
 import { worker } from '../mail/manager.js';
@@ -9,7 +9,7 @@ import { sendMail } from '../mail/send.js';
 import { moveMessages, setFlag } from '../routes/mail.js';
 import { formatWhen, parseQuickTask } from '../tasks/parse.js';
 import { completeTask, createTask, deleteTask, dueToday, skipTask, snoozeTask } from '../tasks/service.js';
-import { HELP, fullMailCard, inboxCard, linksCard, loadMail, taskCard } from './cards.js';
+import { fullMailCard, helpText, inboxCard, linksCard, loadMail, taskCard } from './cards.js';
 import type { BotIO, Card, Platform } from './types.js';
 import { plain } from './types.js';
 
@@ -146,7 +146,7 @@ export async function handleText(user: User, platform: Platform, raw: string, io
       case '/start':
       case '/help':
       case '帮助':
-        return io.reply({ tone: 'info', text: HELP });
+        return io.reply({ tone: 'info', text: helpText() });
       case '/inbox':
       case '未读':
         return io.reply(await inboxCard(user));
@@ -164,7 +164,7 @@ export async function handleText(user: User, platform: Platform, raw: string, io
         return quickAdd(user, platform, arg, io);
     }
     // 没配置 AI 时，普通消息当作一句话新建计划；配置了就交给助手
-    if (!aiConfigOf(user)) return quickAdd(user, platform, text, io);
+    if (!(await resolveTask(user, 'assistant'))) return quickAdd(user, platform, text, io);
     await aiAnswer(user, platform, text, io);
   } catch (e) {
     await io.reply({ tone: 'warn', text: `出错了：${plain((e as Error).message)}` });

@@ -1,0 +1,276 @@
+import { randomInt } from 'node:crypto';
+import type { FastifyInstance } from 'fastify';
+import { registerApp } from '@larksuiteoapi/node-sdk';
+import { z } from 'zod';
+import { requireAdmin } from '../auth.js';
+import { providerInput, publicProvider, saveProvider } from '../ai/tasks.js';
+import type { ProviderRow } from '../ai/tasks.js';
+import { discordInviteUrl } from '../bots/discord.js';
+import { botStatus, restartBot } from '../bots/hub.js';
+import { APP_VERSION, config } from '../config.js';
+import { hashPassword } from '../crypto.js';
+import { exec, one, query } from '../db.js';
+import { stopAccount } from '../mail/manager.js';
+import { microsoftRedirectUri } from '../mail/oauth.js';
+import { integration, maskedIntegrations, publicSite, saveIntegration, saveSite, siteConfig, siteSchema } from '../site.js';
+import type { Integrations } from '../site.js';
+
+const started = Date.now();
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const randomCode = (n: number) => Array.from({ length: n }, () => CODE_CHARS[randomInt(CODE_CHARS.length)]).join('');
+
+/** 每个平台可以修改的字段 */
+const integrationFields: Record<keyof Integrations, z.ZodTypeAny> = {
+  telegram: z.object({ token: z.string().max(200), proxy: z.string().max(300) }).partial(),
+  feishu: z.object({ appId: z.string().max(100), appSecret: z.string().max(200), domain: z.enum(['feishu', 'lark']) }).partial(),
+  discord: z.object({ token: z.string().max(200) }).partial(),
+  slack: z.object({ botToken: z.string().max(200), appToken: z.string().max(200) }).partial(),
+  microsoft: z.object({ clientId: z.string().max(100), clientSecret: z.string().max(200) }).partial(),
+};
+
+/** 在 Slack 里"从清单创建应用"用的清单：Socket Mode、权限、事件、交互一次配好 */
+function slackManifest() {
+  const name = siteConfig().name;
+  return {
+    display_information: { name, description: `${name} 邮件与计划通知`, background_color: '#283026' },
+    features: {
+      app_home: { home_tab_enabled: false, messages_tab_enabled: true, messages_tab_read_only_enabled: false },
+      bot_user: { display_name: name, always_online: true },
+    },
+    oauth_config: { scopes: { bot: ['chat:write', 'im:history', 'im:read', 'im:write', 'files:write'] } },
+    settings: {
+      event_subscriptions: { bot_events: ['message.im'] },
+      interactivity: { is_enabled: true },
+      org_deploy_enabled: false,
+      socket_mode_enabled: true,
+      token_rotation_enabled: false,
+    },
+  };
+}
+
+// 飞书"扫码创建应用"是一个需要等待用户操作的过程，状态放在内存里供前端轮询
+let feishuJob: { state: 'waiting' | 'done' | 'error'; url?: string; error?: string; abort: AbortController } | null = null;
+
+export async function adminRoutes(app: FastifyInstance) {
+  app.addHook('preHandler', requireAdmin);
+
+  app.get('/api/admin/overview', async () => {
+    const count = async (sql: string) => Number((await one<{ n: number }>(sql))!.n);
+    return {
+      version: APP_VERSION,
+      node: process.version,
+      uptime: Math.round((Date.now() - started) / 1000),
+      users: await count('SELECT COUNT(*) AS n FROM users'),
+      accounts: await count('SELECT COUNT(*) AS n FROM accounts'),
+      messages: await count('SELECT COUNT(*) AS n FROM messages'),
+      tasks: await count(`SELECT COUNT(*) AS n FROM tasks WHERE status = 'open'`),
+      dbSize: Number(
+        (await one<{ n: number }>(
+          'SELECT COALESCE(SUM(data_length + index_length), 0) AS n FROM information_schema.tables WHERE table_schema = DATABASE()',
+        ))!.n,
+      ),
+      bots: botStatus(),
+      publicUrl: config.publicUrl,
+    };
+  });
+
+  // ---- 站点外观与注册 ----
+
+  app.get('/api/admin/site', async () => siteConfig());
+
+  app.put('/api/admin/site', async (req, reply) => {
+    try {
+      return await saveSite(siteSchema.partial().parse(req.body));
+    } catch (e: any) {
+      return reply.code(400).send({ error: e.issues?.[0]?.message || e.message });
+    }
+  });
+
+  // ---- 集成：聊天平台与 OAuth 凭据 ----
+
+  app.get('/api/admin/integrations', async () => ({
+    values: maskedIntegrations(),
+    status: botStatus(),
+    discordInvite: discordInviteUrl(),
+    microsoftRedirect: microsoftRedirectUri(),
+    slackManifest: slackManifest(),
+  }));
+
+  app.put<{ Params: { platform: string } }>('/api/admin/integrations/:platform', async (req, reply) => {
+    const platform = req.params.platform as keyof Integrations;
+    const schema = integrationFields[platform];
+    if (!schema) return reply.code(404).send({ error: '未知平台' });
+    await saveIntegration(platform, schema.parse(req.body) as never);
+    if (platform !== 'microsoft') {
+      // 新凭据立即生效：重启这个平台的机器人，并把连接结果返回给前端
+      try {
+        await restartBot(platform);
+      } catch (e: any) {
+        return reply.code(400).send({ error: `已保存，但连接失败：${e.message}` });
+      }
+    }
+    return { ok: true, status: botStatus(), discordInvite: discordInviteUrl() };
+  });
+
+  app.post('/api/admin/feishu/register', async (req) => {
+    const { lark } = z.object({ lark: z.boolean().default(false) }).parse(req.body ?? {});
+    feishuJob?.abort.abort();
+    const abort = new AbortController();
+    const job: NonNullable<typeof feishuJob> = { state: 'waiting', abort };
+    feishuJob = job;
+    const urlReady = new Promise<string>((resolve, reject) => {
+      registerApp({
+        signal: abort.signal,
+        source: 'orbox',
+        createOnly: true,
+        ...(lark ? { domain: 'accounts.larksuite.com' } : {}),
+        appPreset: { name: siteConfig().name, desc: `${siteConfig().name} 邮件与计划通知机器人` },
+        addons: {
+          scopes: { tenant: ['im:message', 'im:message.p2p_msg:readonly', 'im:message:send_as_bot', 'im:resource'] },
+          events: { items: { tenant: ['im.message.receive_v1'] } },
+          callbacks: { items: ['card.action.trigger'] },
+        },
+        onQRCodeReady: (info) => {
+          job.url = info.url;
+          resolve(info.url);
+        },
+      })
+        .then(async (r) => {
+          await saveIntegration('feishu', { appId: r.client_id, appSecret: r.client_secret, domain: r.user_info?.tenant_brand === 'lark' ? 'lark' : 'feishu' });
+          job.state = 'done';
+          await restartBot('feishu').catch((e) => (job.error = `应用已创建，但还没连上：${e.message}`));
+        })
+        .catch((e) => {
+          job.state = 'error';
+          job.error = e.description || e.message;
+          reject(e);
+        });
+    });
+    return { url: await urlReady };
+  });
+
+  app.get('/api/admin/feishu/register', async () => ({
+    state: feishuJob?.state ?? null,
+    url: feishuJob?.url,
+    error: feishuJob?.error,
+    appId: integration('feishu').appId,
+  }));
+
+  // ---- 用户 ----
+
+  app.get('/api/admin/users', () =>
+    query(
+      `SELECT u.id, u.email, u.name, u.is_admin, u.disabled, u.created_at, u.last_login_at,
+              (SELECT COUNT(*) FROM accounts a WHERE a.user_id = u.id) AS accounts
+       FROM users u ORDER BY u.id`,
+    ),
+  );
+
+  app.patch<{ Params: { id: string } }>('/api/admin/users/:id', async (req, reply) => {
+    const id = Number(req.params.id);
+    const body = z.object({ isAdmin: z.boolean(), disabled: z.boolean(), name: z.string().trim().min(1).max(100) }).partial().parse(req.body);
+    if (id === req.user.id && (body.isAdmin === false || body.disabled)) return reply.code(400).send({ error: '不能取消自己的管理员身份或停用自己' });
+    if (body.isAdmin !== undefined) await exec('UPDATE users SET is_admin = ? WHERE id = ?', [+body.isAdmin, id]);
+    if (body.disabled !== undefined) {
+      await exec('UPDATE users SET disabled = ? WHERE id = ?', [+body.disabled, id]);
+      if (body.disabled) await exec('DELETE FROM sessions WHERE user_id = ?', [id]);
+    }
+    if (body.name) await exec('UPDATE users SET name = ? WHERE id = ?', [body.name, id]);
+    return { ok: true };
+  });
+
+  /** 生成一个临时密码交给用户，同时让他所有已登录的设备下线 */
+  app.post<{ Params: { id: string } }>('/api/admin/users/:id/reset-password', async (req) => {
+    const password = `${randomCode(4)}-${randomCode(4)}-${randomCode(4)}`;
+    await exec('UPDATE users SET password_hash = ? WHERE id = ?', [await hashPassword(password), req.params.id]);
+    await exec('DELETE FROM sessions WHERE user_id = ?', [req.params.id]);
+    return { password };
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/admin/users/:id', async (req, reply) => {
+    const id = Number(req.params.id);
+    if (id === req.user.id) return reply.code(400).send({ error: '不能删除自己' });
+    for (const a of await query<{ id: number }>('SELECT id FROM accounts WHERE user_id = ?', [id])) stopAccount(a.id);
+    await exec('DELETE FROM users WHERE id = ?', [id]);
+    return { ok: true };
+  });
+
+  // ---- 邀请码 ----
+
+  app.get('/api/admin/invites', () =>
+    query(
+      `SELECT i.code, i.note, i.used_at, i.expires_at, i.created_at, u.email AS used_by_email
+       FROM invites i LEFT JOIN users u ON u.id = i.used_by ORDER BY i.created_at DESC LIMIT 200`,
+    ),
+  );
+
+  app.post('/api/admin/invites', async (req) => {
+    const body = z.object({ note: z.string().trim().max(100).default(''), days: z.number().int().min(0).max(365).default(7), count: z.number().int().min(1).max(20).default(1) }).parse(req.body ?? {});
+    const codes: string[] = [];
+    for (let i = 0; i < body.count; i++) {
+      const code = randomCode(10);
+      await exec(`INSERT INTO invites (code, note, created_by, expires_at) VALUES (?, ?, ?, ${body.days ? 'UTC_TIMESTAMP() + INTERVAL ? DAY' : 'NULL'})`, [
+        code,
+        body.note,
+        req.user.id,
+        ...(body.days ? [body.days] : []),
+      ]);
+      codes.push(code);
+    }
+    return { codes };
+  });
+
+  app.delete<{ Params: { code: string } }>('/api/admin/invites/:code', async (req) => {
+    await exec('DELETE FROM invites WHERE code = ?', [req.params.code]);
+    return { ok: true };
+  });
+
+  // ---- 共享模型服务（提供给所有用户） ----
+
+  app.get('/api/admin/ai-providers', async () => (await query<ProviderRow>('SELECT * FROM ai_providers WHERE user_id IS NULL ORDER BY id')).map(publicProvider));
+  app.post('/api/admin/ai-providers', async (req) => ({ id: await saveProvider(null, null, providerInput.parse(req.body)) }));
+  app.put<{ Params: { id: string } }>('/api/admin/ai-providers/:id', async (req) => ({ id: await saveProvider(null, Number(req.params.id), providerInput.parse(req.body)) }));
+  app.delete<{ Params: { id: string } }>('/api/admin/ai-providers/:id', async (req) => {
+    await exec('DELETE FROM ai_providers WHERE id = ? AND user_id IS NULL', [req.params.id]);
+    return { ok: true };
+  });
+}
+
+/** 不需要登录的站点资源：Logo 和 PWA 清单都跟着后台设置走 */
+export async function siteRoutes(app: FastifyInstance) {
+  app.get('/api/site', async () => publicSite());
+
+  app.get('/api/site/logo', async (_req, reply) => {
+    const logo = siteConfig().logo;
+    const m = logo.match(/^data:(image\/[a-z+]+);base64,(.*)$/);
+    if (!m) return reply.redirect('/logo.svg');
+    return reply.header('Content-Type', m[1]).header('Cache-Control', 'public, max-age=300').header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'").send(Buffer.from(m[2], 'base64'));
+  });
+
+  app.get('/api/site/manifest.webmanifest', async (_req, reply) => {
+    const s = siteConfig();
+    const icons = s.logo
+      ? [{ src: '/api/site/logo', sizes: 'any', type: s.logo.slice(5, s.logo.indexOf(';')) }]
+      : [
+          { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
+          { src: '/icon-512.png', sizes: '512x512', type: 'image/png' },
+          { src: '/icon-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+        ];
+    return reply.type('application/manifest+json').send({
+      name: s.name,
+      short_name: s.name,
+      description: s.subtitle,
+      lang: 'zh-CN',
+      start_url: '/mail',
+      scope: '/',
+      display: 'standalone',
+      background_color: '#fafbf8',
+      theme_color: '#fafbf8',
+      icons,
+      shortcuts: [
+        { name: '写邮件', url: '/mail?compose=1' },
+        { name: '计划', url: '/planner' },
+      ],
+    });
+  });
+}

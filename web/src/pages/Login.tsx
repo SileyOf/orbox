@@ -1,14 +1,26 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { api } from '../api';
-import type { User } from '../api';
+import type { SiteInfo, User } from '../api';
+import { useSite } from '../App';
+import { applyAppearance } from '../lib';
 
 export function Login() {
   const qc = useQueryClient();
-  const status = useQuery({ queryKey: ['auth-status'], queryFn: () => api<{ allowRegistration: boolean }>('/auth/status') });
+  const status = useQuery({ queryKey: ['auth-status'], queryFn: () => api<{ allowRegistration: boolean; inviteRequired: boolean; site: SiteInfo }>('/auth/status') });
+  const site = useSite();
+  // 第一次来的访客用站点设置的默认主题和强调色
+  useEffect(() => {
+    if (!site) return;
+    let stored = false;
+    try {
+      stored = !!localStorage.getItem('orbox.accent');
+    } catch {}
+    if (!stored) applyAppearance({ theme: site.theme, accent: site.accent });
+  }, [site?.accent, site?.theme]);
   const [mode, setMode] = useState<'login' | 'register'>('login');
-  const [form, setForm] = useState({ name: '', email: '', password: '' });
+  const [form, setForm] = useState({ name: '', email: '', password: '', invite: '' });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
@@ -33,12 +45,13 @@ export function Login() {
     <div className="auth">
       <form className="card auth-card" onSubmit={submit}>
         <div className="auth-brand">
-          <img src="/logo.svg" alt="" />
+          <img src={site?.hasLogo ? '/api/site/logo' : '/logo.svg'} alt="" />
           <div>
-            <b>Orbox</b>
-            <span className="muted small">起源 · 邮件与计划</span>
+            <b>{site?.name ?? ''}</b>
+            <span className="muted small">{site?.subtitle}</span>
           </div>
         </div>
+        {site?.loginText && <div className="muted small" style={{ whiteSpace: 'pre-wrap' }}>{site.loginText}</div>}
         {mode === 'register' && (
           <label className="field">
             <span>昵称</span>
@@ -61,6 +74,12 @@ export function Login() {
             autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
           />
         </label>
+        {mode === 'register' && status.data?.inviteRequired && (
+          <label className="field">
+            <span>邀请码</span>
+            <input className="input" required value={form.invite} onChange={set('invite')} autoComplete="off" style={{ textTransform: 'uppercase' }} />
+          </label>
+        )}
         {error && <div style={{ color: 'var(--danger)' }}>{error}</div>}
         <button className="btn primary block" disabled={busy}>
           {mode === 'login' ? '登录' : '创建账号'}
@@ -71,6 +90,7 @@ export function Login() {
           </button>
         )}
       </form>
+      {site?.footer && <div className="muted small auth-footer">{site.footer}</div>}
     </div>
   );
 }

@@ -13,8 +13,48 @@ export interface UserSettings {
   channels: { bark: string; ntfy: string; webhook: string };
   threads: boolean;
   translateTo: string;
-  aiFilter: boolean;
-  ai: { provider: 'anthropic' | 'openai'; baseUrl: string; model: string; fastModel: string; hasKey: boolean } | null;
+  importantOnly: boolean;
+  aiTasks?: Partial<Record<AiTaskName, AiTaskSetting>>;
+  routing?: Record<string, Partial<Record<EventKind, boolean>>>;
+}
+
+export type EventKind = 'mail' | 'code' | 'task' | 'digest' | 'snooze';
+
+export type AiTaskName = 'filter' | 'code' | 'links' | 'summary' | 'translate' | 'todos' | 'reply' | 'assistant';
+
+export interface AiTaskSetting {
+  enabled: boolean;
+  providerId: number | null;
+  model: string;
+}
+
+export interface AiProvider {
+  id: number;
+  name: string;
+  kind: 'anthropic' | 'openai';
+  baseUrl: string;
+  defaultModel: string;
+  models: string[];
+  shared: boolean;
+}
+
+export interface AiInfo {
+  providers: AiProvider[];
+  tasks: Record<AiTaskName, AiTaskSetting>;
+  meta: Record<AiTaskName, { label: string; hint: string; tier: 'fast' | 'strong'; local: string | null }>;
+  active: Record<AiTaskName, boolean>;
+  shareAi: boolean;
+}
+
+export interface SiteInfo {
+  name: string;
+  subtitle: string;
+  loginText: string;
+  footer: string;
+  accent: string;
+  theme: 'system' | 'light' | 'dark';
+  registration: 'open' | 'invite' | 'closed';
+  hasLogo: boolean;
 }
 
 export interface User {
@@ -24,6 +64,8 @@ export interface User {
   isAdmin: boolean;
   timezone: string;
   settings: UserSettings;
+  /** 只有管理员有：后台页面的地址 */
+  adminPath?: string;
 }
 
 export interface Folder {
@@ -117,6 +159,8 @@ export interface LinkInfo {
   domain: string;
   kind: LinkKind;
   suspicious?: boolean;
+  label?: string;
+  ai?: boolean;
 }
 
 export const LINK_LABELS: Record<LinkKind, string> = {

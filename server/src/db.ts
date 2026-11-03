@@ -8,6 +8,8 @@ export const pool = mysql.createPool({
   timezone: 'Z',
   charset: 'utf8mb4',
   connectionLimit: 10,
+  // 跨地域连接数据库时握手可能要好几秒，默认 10 秒超时太紧
+  connectTimeout: 30_000,
   supportBigNumbers: true,
 });
 

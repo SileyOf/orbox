@@ -1,6 +1,6 @@
 # Orbox
 
-当前版本 0.3.0，更新记录见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 0.4.0，更新记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 起源系列的邮件与计划客户端：多邮箱 Webmail + Telegram 通知 + 带提醒的计划表。
 兼容 mailcow，也能接入任何标准 IMAP/SMTP 邮箱。
@@ -50,4 +50,6 @@ docker compose up -d --build
 - [x] 会话线程、Sieve 过滤规则、链接提取
 - [x] Telegram / 飞书 / Discord / Slack 机器人，完整读信与附件
 - [x] AI：摘要、翻译、待办提取、重要性分类、回复草稿、助手、MCP
-- [ ] Gmail OAuth、管理后台、两步验证
+- [x] 后台管理（站点外观、注册与用户、网页配置集成、共享模型）
+- [x] 多模型按任务分配、本地规则兜底、用量统计
+- [ ] Gmail OAuth、两步验证、企业多租户

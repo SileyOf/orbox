@@ -1,10 +1,10 @@
 import { DateTime } from 'luxon';
 import type { User } from '../auth.js';
-import { aiConfigOf } from '../ai/provider.js';
 import { one, query } from '../db.js';
 import { LINK_LABELS, primaryLink } from '../mail/links.js';
 import type { LinkInfo } from '../mail/links.js';
 import { webviewUrl } from '../mail/webview.js';
+import { siteConfig } from '../site.js';
 import { formatWhen } from '../tasks/parse.js';
 import { dueToday } from '../tasks/service.js';
 import type { TaskRow } from '../tasks/service.js';
@@ -45,19 +45,25 @@ const sender = (m: MailRow) => m.from_name || m.from_addr;
 const addrs = (list: MailRow['to_json']) => (list || []).map((a) => a.name || a.address).join('、');
 
 /** 新邮件通知卡片 */
-export function mailCard(user: User, m: MailRow, opts: { vip?: boolean; resurfaced?: boolean } = {}): Card {
-  const ai = !!aiConfigOf(user) && !!m.ai_enabled;
+export interface AiButtons {
+  summary: boolean;
+  translate: boolean;
+}
+
+export function mailCard(user: User, m: MailRow, opts: { vip?: boolean; resurfaced?: boolean; ai?: AiButtons } = {}): Card {
+  const ai = { summary: !!opts.ai?.summary && !!m.ai_enabled, translate: !!opts.ai?.translate && !!m.ai_enabled };
   const rows: Button[][] = [];
   if (m.code) rows.push([{ text: `复制 ${m.code}`, copy: m.code }]);
   const key = primaryLink(m.links);
   const read: Button[] = [{ text: '阅读全文', action: `m:f:${m.id}` }];
-  if (ai) read.push({ text: 'AI 摘要', action: `m:s:${m.id}` }, { text: '翻译', action: `m:tr:${m.id}` });
+  if (ai.summary) read.push({ text: 'AI 摘要', action: `m:s:${m.id}` });
+  if (ai.translate) read.push({ text: '翻译', action: `m:tr:${m.id}` });
   rows.push(read);
   const ops: Button[] = [{ text: '已读', action: `m:r:${m.id}` }, { text: '归档', action: `m:a:${m.id}` }];
   if (!m.code) ops.push({ text: '转为待办', action: `m:t:${m.id}` });
   rows.push(ops);
   const extra: Button[] = [];
-  if (key) extra.push({ text: `${LINK_LABELS[key.kind].split(' ')[0]} · ${key.domain}`, url: key.url });
+  if (key) extra.push({ text: `${key.label || LINK_LABELS[key.kind].split(' ')[0]} · ${key.domain}`, url: key.url });
   if (m.links?.length) extra.push({ text: `链接（${m.links.length}）`, action: `m:l:${m.id}` });
   if (extra.length) rows.push(extra);
 
@@ -222,7 +228,7 @@ export function chunk<T>(list: T[], n: number): T[][] {
   return out;
 }
 
-export const HELP = `我是 Orbox 助手，可以：
+export const helpText = () => `我是 ${siteConfig().name} 助手，可以：
 
 • 新邮件到达时推送，直接阅读全文、看附件和链接、翻译、摘要
 • 计划到点提醒，点按钮完成或稍后再提醒

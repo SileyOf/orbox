@@ -1,7 +1,7 @@
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
-import { APP_NAME } from '../config.js';
-import type { User } from '../auth.js';
+import { siteConfig } from '../site.js';
+import type { EventKind, User } from '../auth.js';
 
 // Telegram 之外的推送通道。它们只能单向推送，不带可点击的操作按钮。
 export interface Push {
@@ -50,7 +50,7 @@ const senders: Record<ChannelName, (target: string, p: Push) => Promise<void>> =
       device_key: key,
       title: p.title,
       body: p.body,
-      group: APP_NAME,
+      group: siteConfig().name,
       url: p.url,
       // 验证码推送到手后直接进剪贴板
       ...(p.code ? { copy: p.code, autoCopy: '1', level: 'timeSensitive' } : {}),
@@ -72,7 +72,7 @@ const senders: Record<ChannelName, (target: string, p: Push) => Promise<void>> =
   },
   // 通用 Webhook：原样 POST 一个 JSON，方便接入企业微信、Discord 转发器或自己的脚本
   async webhook(target, p) {
-    await post(await publicUrl(target), { app: APP_NAME, ...p, text: `${p.title}\n${p.body}` });
+    await post(await publicUrl(target), { app: siteConfig().name, ...p, text: `${p.title}\n${p.body}` });
   },
 };
 
@@ -81,11 +81,11 @@ export async function sendChannel(name: ChannelName, target: string, push: Push)
 }
 
 /** 推送到用户配置的所有通道，单个通道失败不影响其他通道 */
-export async function pushChannels(user: User, push: Push): Promise<void> {
+export async function pushChannels(user: User, push: Push, kind?: EventKind): Promise<void> {
   const channels = user.settings.channels;
   await Promise.all(
     (Object.keys(senders) as ChannelName[])
-      .filter((name) => channels[name])
+      .filter((name) => channels[name] && (!kind || user.settings.routing?.[name]?.[kind] !== false))
       .map((name) => sendChannel(name, channels[name], push).catch((e) => console.error(`[${name}]`, e.message))),
   );
 }

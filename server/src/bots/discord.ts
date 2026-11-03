@@ -1,6 +1,6 @@
 import { ActionRowBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ChannelType, Client, Events, GatewayIntentBits, MessageFlags, Partials } from 'discord.js';
 import type { ButtonInteraction, Message } from 'discord.js';
-import { config } from '../config.js';
+import { integration } from '../site.js';
 import { inboundAction, inboundText } from './hub.js';
 import type { Adapter, BotIO, Card } from './types.js';
 import { splitCard } from './types.js';
@@ -49,10 +49,16 @@ function ioFor(chatId: string, interaction?: ButtonInteraction): BotIO {
   };
 }
 
+/** 把机器人拉进服务器的邀请链接（需要和机器人在同一个服务器才能私信） */
+export const discordInviteUrl = () =>
+  client?.application?.id
+    ? `https://discord.com/oauth2/authorize?client_id=${client.application.id}&scope=bot&permissions=${2048 + 32768}`
+    : null;
+
 export const discord: Adapter = {
   platform: 'discord',
   label: 'Discord',
-  enabled: () => !!config.discordToken,
+  enabled: () => !!integration('discord').token,
   name: () => client?.user?.username ?? null,
   bindHint: (code) => ({ text: `私信机器人 ${client?.user?.username ?? ''}，发送：绑定 ${code}（需要先和机器人在同一个服务器，或把它安装到你的账号）` }),
 
@@ -68,7 +74,7 @@ export const discord: Adapter = {
       await inboundAction('discord', i.channelId, i.customId, ioFor(i.channelId, i));
     });
     c.on(Events.Error, (e) => console.error('[discord]', e.message));
-    await c.login(config.discordToken);
+    await c.login(integration('discord').token);
     client = c;
     console.log(`[discord] ${c.user?.tag} 已连接`);
   },

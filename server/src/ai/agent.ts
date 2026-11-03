@@ -1,9 +1,11 @@
 import { DateTime } from 'luxon';
 import type { User } from '../auth.js';
 import { query } from '../db.js';
-import { AiError, aiConfigOf, newConversation, runTools } from './provider.js';
+import { runTools } from './provider.js';
+import { requireTask } from './tasks.js';
 import type { Conversation } from './provider.js';
 import { peekPending, runTool, toolSpecs } from './tools.js';
+import { siteConfig } from '../site.js';
 
 // 内置 AI 助手：网页和各个聊天机器人共用。每个"渠道"（网页、Telegram、飞书……）各自保持一段对话。
 
@@ -27,7 +29,7 @@ async function systemPrompt(user: User, channel: string): Promise<string> {
     [user.id],
   );
   return [
-    `你是 Orbox 里的邮件与计划助手，正在通过「${channel}」和用户 ${user.name} 对话。`,
+    `你是 ${siteConfig().name} 里的邮件与计划助手，正在通过「${channel}」和用户 ${user.name} 对话。`,
     `现在是 ${now.toFormat('yyyy-LL-dd HH:mm')}（${user.timezone}，${now.setLocale('zh-CN').toFormat('cccc')}）。`,
     accounts.length
       ? `你能访问的邮箱：${accounts.map((a) => `${a.name} <${a.email}>（id ${a.id}）`).join('；')}。`
@@ -45,17 +47,18 @@ export interface AgentReply {
 }
 
 export async function askAssistant(user: User, channel: string, text: string): Promise<AgentReply> {
-  const cfg = aiConfigOf(user);
-  if (!cfg) throw new AiError('还没有配置 AI 模型，请在 设置 → AI 里填写');
+  const target = await requireTask(user, 'assistant');
   const key = `${user.id}:${channel}`;
+  // 换了模型或服务就开新对话：不同家的消息格式不通用
+  const convKey = `${target.kind}|${target.baseUrl}|${target.model}`;
   let s = sessions.get(key);
-  if (!s || s.updated < Date.now() - IDLE_MS || s.turns >= MAX_TURNS || s.conv.provider !== cfg.provider || s.conv.model !== cfg.model) {
-    s = { conv: newConversation(cfg), turns: 0, updated: Date.now() };
+  if (!s || s.updated < Date.now() - IDLE_MS || s.turns >= MAX_TURNS || s.conv.key !== convKey) {
+    s = { conv: { key: convKey, messages: [] }, turns: 0, updated: Date.now() };
     sessions.set(key, s);
   }
   const drafted: string[] = [];
   const ctx = { user, mode: 'assistant' as const, allowSend: false };
-  const reply = await runTools(cfg, s.conv, await systemPrompt(user, channel), text, toolSpecs(ctx), async (name, input) => {
+  const reply = await runTools(target, s.conv, await systemPrompt(user, channel), text, toolSpecs(ctx), async (name, input) => {
     const out = await runTool(name, input, ctx);
     if (name === 'draft_email') {
       const id = JSON.parse(out).pending_id;

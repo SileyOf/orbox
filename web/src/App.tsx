@@ -1,11 +1,12 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { CalendarCheck, Mail as MailIcon, Monitor, Moon, Settings as SettingsIcon, Sparkles, Sun } from 'lucide-react';
 import { createContext, useContext, useEffect, useState } from 'react';
-import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { ApiError, api } from './api';
-import type { Account, Task, User } from './api';
+import type { Account, SiteInfo, Task, User } from './api';
 import { applyAppearance, copyText, dismissToast, toast, useToasts } from './lib';
 import { Assistant } from './components/Assistant';
+import { Admin } from './pages/Admin';
 import { Login } from './pages/Login';
 import { MailPage } from './pages/Mail';
 import { Planner } from './pages/Planner';
@@ -13,6 +14,19 @@ import { Settings } from './pages/Settings';
 
 const UserContext = createContext<User>(null!);
 export const useUser = () => useContext(UserContext);
+
+/** 站点外观（名称、Logo 等），登录前后都需要 */
+export function useSite(): SiteInfo | undefined {
+  const status = useQuery({ queryKey: ['auth-status'], queryFn: () => api<{ site: SiteInfo }>('/auth/status'), staleTime: 5 * 60_000 });
+  const site = status.data?.site;
+  useEffect(() => {
+    if (!site) return;
+    document.title = site.name;
+    const icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (icon) icon.href = site.hasLogo ? '/api/site/logo' : '/logo.svg';
+  }, [site?.name, site?.hasLogo]);
+  return site;
+}
 
 export const useAccounts = () => useQuery({ queryKey: ['accounts'], queryFn: () => api<Account[]>('/accounts') });
 export const useTasks = (status: 'open' | 'done' = 'open') =>
@@ -100,6 +114,8 @@ function Shell({ user }: { user: User }) {
   const dueNow = (tasks || []).filter((t) => t.due_at && new Date(t.due_at).getTime() <= Date.now()).length;
 
   const [assistant, setAssistant] = useState(false);
+  const site = useSite();
+  const location = useLocation();
   const { theme } = user.settings;
   const nextTheme = theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system';
   const ThemeIcon = theme === 'system' ? Monitor : theme === 'light' ? Sun : Moon;
@@ -108,7 +124,7 @@ function Shell({ user }: { user: User }) {
   return (
     <div className="app">
       <nav className="rail">
-        <img className="rail-logo" src="/logo.svg" alt="Orbox" />
+        <img className="rail-logo" src={site?.hasLogo ? '/api/site/logo' : '/logo.svg'} alt={site?.name} title={site?.name} />
         <NavLink to="/mail" className={link} title="邮件">
           <MailIcon size={20} />
           {unread > 0 && <span className="badge">{unread > 99 ? '99+' : unread}</span>}
@@ -128,7 +144,7 @@ function Shell({ user }: { user: User }) {
         >
           <ThemeIcon size={19} />
         </button>
-        <NavLink to="/settings" className={link} title="设置">
+        <NavLink to="/settings/mailboxes" className={() => link({ isActive: location.pathname.startsWith('/settings') || (!!user.adminPath && location.pathname.startsWith(`/${user.adminPath}`)) })} title="设置">
           <SettingsIcon size={20} />
         </NavLink>
       </nav>
@@ -136,7 +152,8 @@ function Shell({ user }: { user: User }) {
         <Routes>
           <Route path="/mail" element={<MailPage />} />
           <Route path="/planner" element={<Planner />} />
-          <Route path="/settings" element={<Settings />} />
+          <Route path="/settings/:section?" element={<Settings />} />
+          {user.adminPath && <Route path={`/${user.adminPath}/:section?`} element={<Admin />} />}
           <Route path="*" element={<Navigate to="/mail" replace />} />
         </Routes>
       </main>

@@ -2,7 +2,8 @@ import { DateTime } from 'luxon';
 import type { User } from '../auth.js';
 import { exec, one } from '../db.js';
 import { worker } from '../mail/manager.js';
-import { AiError, aiConfigOf, complete, parseJson } from './provider.js';
+import { AiError, complete, parseJson } from './provider.js';
+import { requireTask } from './tasks.js';
 
 // 针对单封邮件的 AI 功能。结果按 Message-ID 缓存，同一封邮件不会重复花钱。
 
@@ -73,14 +74,8 @@ async function cached(user: User, m: MailForAi, kind: string, param: string, mak
   return content;
 }
 
-function requireConfig(user: User) {
-  const cfg = aiConfigOf(user);
-  if (!cfg) throw new AiError('还没有配置 AI 模型，请在 设置 → AI 里填写');
-  return cfg;
-}
-
 export async function summarize(user: User, id: number, fresh = false): Promise<string> {
-  const cfg = requireConfig(user);
+  const cfg = await requireTask(user, 'summary');
   const m = await loadMailForAi(user.id, id);
   if (fresh) await exec(`DELETE FROM ai_cache WHERE user_id = ? AND ref = ? AND kind = 'summary'`, [user.id, refOf(m)]);
   return cached(user, m, 'summary', '', async () => {
@@ -97,7 +92,7 @@ export async function summarize(user: User, id: number, fresh = false): Promise<
 }
 
 export async function translate(user: User, id: number, lang?: string): Promise<string> {
-  const cfg = requireConfig(user);
+  const cfg = await requireTask(user, 'translate');
   const target = lang || user.settings.translateTo || '简体中文';
   const m = await loadMailForAi(user.id, id);
   return cached(user, m, 'translate', target.slice(0, 32), async () => {
@@ -120,7 +115,7 @@ export interface TodoSuggestion {
 }
 
 export async function extractTodos(user: User, id: number): Promise<TodoSuggestion[]> {
-  const cfg = requireConfig(user);
+  const cfg = await requireTask(user, 'todos');
   const m = await loadMailForAi(user.id, id);
   const now = DateTime.now().setZone(user.timezone);
   const text = await cached(user, m, 'todos', now.toISODate()!, async () =>
@@ -129,12 +124,15 @@ export async function extractTodos(user: User, id: number): Promise<TodoSuggesti
         `从邮件里找出需要收件人去做的事，只要明确的行动项（回复、付款、提交、参加、续费……），没有就返回空数组。` +
         `现在是 ${now.toFormat("yyyy-LL-dd'T'HH:mm")}（${user.timezone}，${now.setLocale('zh-CN').toFormat('cccc')}）。` +
         `把邮件里的相对时间换算成这个时区的本地时间。` +
-        `只输出 JSON：[{"title":"简短的动宾短语","due":"YYYY-MM-DDTHH:mm 或 null","notes":"一句话补充，可为空"}]`,
+        `只输出 JSON：{"items":[{"title":"简短的动宾短语","due":"YYYY-MM-DDTHH:mm 或 null","notes":"一句话补充，可为空"}]}`,
       prompt: mailBlock(m).text,
       maxTokens: 2000,
+      json: true,
     }),
   );
-  const list = parseJson<TodoSuggestion[]>(text);
+  const parsed = parseJson<TodoSuggestion[] | { items?: TodoSuggestion[] }>(text);
+  // JSON 模式下有的模型会包一层对象
+  const list = Array.isArray(parsed) ? parsed : parsed.items || [];
   return Array.isArray(list)
     ? list
         .filter((t) => t && typeof t.title === 'string')
@@ -148,7 +146,7 @@ export async function extractTodos(user: User, id: number): Promise<TodoSuggesti
 }
 
 export async function draftReply(user: User, id: number, instruction: string): Promise<string> {
-  const cfg = requireConfig(user);
+  const cfg = await requireTask(user, 'reply');
   const m = await loadMailForAi(user.id, id);
   return complete(cfg, {
     system:
@@ -160,51 +158,3 @@ export async function draftReply(user: User, id: number, instruction: string): P
   });
 }
 
-export const LABELS = {
-  important: '重要',
-  reply: '需回复',
-  bill: '账单',
-  notice: '通知',
-  promo: '营销',
-  social: '社交',
-  code: '验证码',
-} as const;
-export type Label = keyof typeof LABELS;
-
-/**
- * 给新邮件打标签，用于"只推送重要邮件"。用快速模型，只看主题、发件人和正文开头，
- * 失败时返回 null（通知照常推送，不因为 AI 出错而漏掉邮件）。
- */
-export async function classify(user: User, id: number): Promise<Label | null> {
-  const cfg = aiConfigOf(user);
-  if (!cfg) return null;
-  const m = await one<{ subject: string; from_name: string; from_addr: string; snippet: string; code: string | null; ai_enabled: number }>(
-    `SELECT m.subject, m.from_name, m.from_addr, m.snippet, m.code, a.ai_enabled
-     FROM messages m JOIN accounts a ON a.id = m.account_id WHERE m.id = ? AND m.user_id = ?`,
-    [id, user.id],
-  );
-  if (!m || !m.ai_enabled) return null;
-  let label: Label | null = m.code ? 'code' : null;
-  if (!label) {
-    try {
-      const out = await complete(cfg, {
-        system:
-          '给邮件分类，只输出一个标签：important（个人或工作上需要关注的）、reply（对方在等回复）、bill（账单/付款/续费/订单）、' +
-          'notice（系统通知、自动发送的提醒）、promo（营销推广、newsletter）、social（社交网络动态）。',
-        prompt: `发件人：${m.from_name} <${m.from_addr}>\n主题：${m.subject}\n摘要：${m.snippet}`,
-        maxTokens: 16,
-        tier: 'fast',
-      });
-      const word = out.toLowerCase().match(/important|reply|bill|notice|promo|social/)?.[0] as Label | undefined;
-      label = word || null;
-    } catch (e) {
-      console.error('[ai classify]', (e as Error).message);
-      return null;
-    }
-  }
-  if (label) await exec('UPDATE messages SET ai_label = ? WHERE id = ?', [label, id]);
-  return label;
-}
-
-/** 值得推送的标签 */
-export const NOTIFY_LABELS: Label[] = ['important', 'reply', 'bill', 'code'];

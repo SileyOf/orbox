@@ -10,6 +10,10 @@ export interface LinkInfo {
   kind: LinkKind;
   /** 链接文字看起来是一个网址，但和真正的跳转域名不同 */
   suspicious?: boolean;
+  /** AI 给出的用途说明 */
+  label?: string;
+  /** 由 AI 挑选和标注 */
+  ai?: boolean;
 }
 
 const RULES: [LinkKind, RegExp][] = [
@@ -114,7 +118,9 @@ export function extractLinks(html: string | null, text: string | null): LinkInfo
 
 /** 值得在通知里单独给按钮的那一个链接：续费/付款优先，其次验证 */
 export function primaryLink(links: LinkInfo[] | null | undefined): LinkInfo | null {
-  return links?.find((l) => (l.kind === 'billing' || l.kind === 'verify') && !l.suspicious) || null;
+  // AI 挑出的第一个链接优先（它已经按重要性排过序）
+  const ai = links?.find((l) => l.ai && !l.suspicious && l.kind !== 'unsubscribe' && l.kind !== 'other');
+  return ai || links?.find((l) => (l.kind === 'billing' || l.kind === 'verify') && !l.suspicious) || null;
 }
 
 export const LINK_LABELS: Record<LinkKind, string> = {

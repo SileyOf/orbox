@@ -7,6 +7,7 @@ import { emit } from '../events.js';
 import { forgetAccessToken, getAccessToken } from './oauth.js';
 import { extractCode } from './code.js';
 import { extractLinks } from './links.js';
+import type { LinkInfo } from './links.js';
 import { parseRefs, subjectKey } from './thread-keys.js';
 import { assignThreads } from './threads.js';
 import { htmlToPlain, makeSnippet, parseSource, structureHasAttachments } from './parse.js';
@@ -336,10 +337,12 @@ class AccountWorker {
           if (!row) continue;
           const peek = await this.peekText(c, m).catch(() => null);
           if (peek?.text) {
-            await exec('UPDATE messages SET snippet = ?, code = ?, links = ? WHERE id = ? AND body_fetched = 0', [
+            // 正文开头先存进 body_text（body_fetched 仍为 0），分拣、搜索和机器人预览可以先用上
+            await exec('UPDATE messages SET snippet = ?, code = ?, links = ?, body_text = ? WHERE id = ? AND body_fetched = 0', [
               makeSnippet(peek.text),
               extractCode(m.envelope?.subject || '', peek.text),
               JSON.stringify(extractLinks(peek.html, peek.html ? null : peek.text)),
+              peek.text.slice(0, 20_000),
               row.id,
             ]);
           }
@@ -587,9 +590,13 @@ class AccountWorker {
   /** 下载并解析正文，写入本地缓存 */
   async loadBody(messageId: number): Promise<void> {
     const body = await this.fetchSource(messageId);
-    const meta = await one<{ subject: string }>('SELECT subject FROM messages WHERE id = ?', [messageId]);
+    const meta = await one<{ subject: string; links: LinkInfo[] | null }>('SELECT subject, links FROM messages WHERE id = ?', [messageId]);
+    // AI 分拣可能已经补过验证码、挑过关键链接，重新解析正文时保留这些结果
+    const fresh = extractLinks(body.html, body.html ? null : body.text);
+    const picked = (meta?.links || []).filter((l) => l.ai);
+    const links = [...picked, ...fresh.filter((l) => !picked.some((p) => p.url === l.url))];
     await exec(
-      `UPDATE messages SET body_fetched = 1, body_text = ?, body_html = ?, snippet = ?, code = ?, attachments = ?,
+      `UPDATE messages SET body_fetched = 1, body_text = ?, body_html = ?, snippet = ?, code = COALESCE(?, code), attachments = ?,
          has_attachments = ?, links = ? WHERE id = ?`,
       [
         body.text,
@@ -598,7 +605,7 @@ class AccountWorker {
         extractCode(meta?.subject || '', body.text),
         JSON.stringify(body.attachments),
         +body.attachments.some((a) => !a.inline),
-        JSON.stringify(extractLinks(body.html, body.html ? null : body.text)),
+        JSON.stringify(links),
         messageId,
       ],
     );
