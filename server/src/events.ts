@@ -7,6 +7,7 @@ export type AppEvent =
   | { type: 'outbox' }
   | { type: 'accounts' }
   | { type: 'tasks' }
+  | { type: 'notes' }
   | { type: 'reminder'; id: number; title: string };
 
 const clients = new Map<number, Set<ServerResponse>>();

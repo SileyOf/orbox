@@ -2,15 +2,26 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { APP_VERSION, config } from './config.js';
 import { hashPassword, randomToken, sha256, verifyPassword } from './crypto.js';
-import { exec, one } from './db.js';
-import { publicSite, siteConfig } from './site.js';
+import { exec, one, query } from './db.js';
+import { ALL_PERMS, publicSite, siteConfig } from './site.js';
+import type { Perms } from './site.js';
 
 const COOKIE = 'orbox_sid';
 const SESSION_DAYS = 30;
 
 export interface UserSettings {
+  /** 正在进行的出差（简单记用），由服务端维护 */
+  trip?: { name: string; start: string };
   theme: 'light' | 'dark' | 'system';
   accent: string;
+  /** 面板效果：通透（半透明 + 模糊）/ 实色 */
+  surface: 'clear' | 'solid';
+  /** 文本选中颜色：accent 表示跟随强调色，否则是颜色值 */
+  selection: string;
+  /** 强调色跟随站点（管理员改了站点强调色会一起变） */
+  followSite: boolean;
+  /** 界面动效 */
+  motion: boolean;
   notifyMail: boolean;
   quietStart: string; // "HH:mm"，与 quietEnd 相同表示关闭免打扰
   quietEnd: string;
@@ -42,6 +53,10 @@ export type EventKind = 'mail' | 'code' | 'task' | 'digest' | 'snooze';
 export const defaultSettings: UserSettings = {
   theme: 'system',
   accent: '#cceb79',
+  surface: 'solid',
+  selection: 'accent',
+  followSite: false,
+  motion: true,
   notifyMail: true,
   quietStart: '23:00',
   quietEnd: '07:30',
@@ -64,6 +79,8 @@ export interface User {
   isAdmin: boolean;
   timezone: string;
   settings: UserSettings;
+  /** 生效的权限（管理员全开；没单独设置的用站点默认） */
+  perms: Perms;
 }
 
 declare module 'fastify' {
@@ -79,12 +96,18 @@ function toUser(row: any): User {
     name: row.name,
     isAdmin: !!row.is_admin,
     timezone: row.timezone,
+    perms: row.is_admin ? ALL_PERMS : { ...siteConfig().defaultPerms, ...(row.perms || {}) },
     settings: {
       ...defaultSettings,
       ...(row.settings || {}),
       channels: { ...defaultSettings.channels, ...(row.settings?.channels || {}) },
     },
   };
+}
+
+/** 检查权限，不满足时抛出 403 */
+export function requirePerm(u: User, perm: Exclude<keyof Perms, 'maxAccounts'>, what: string) {
+  if (!u.perms[perm]) throw Object.assign(new Error(`管理员没有给你开放${what}`), { statusCode: 403 });
 }
 
 /** 返回给前端的用户信息（管理员额外带上后台路径） */
@@ -131,6 +154,9 @@ export async function requireUser(req: FastifyRequest, reply: FastifyReply) {
     );
     if (row) {
       req.user = toUser(row);
+      // 最近活跃时间：5 分钟内只写一次
+      const seen = row.last_seen_at ? new Date(row.last_seen_at).getTime() : 0;
+      if (Date.now() - seen > 300_000) void exec('UPDATE users SET last_seen_at = UTC_TIMESTAMP() WHERE id = ?', [row.id]).catch(() => {});
       return;
     }
   }
@@ -155,6 +181,10 @@ const profilePatch = z.object({
     .object({
       theme: z.enum(['light', 'dark', 'system']),
       accent: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+      surface: z.enum(['clear', 'solid']),
+      selection: z.string().regex(/^(accent|#[0-9a-fA-F]{6})$/),
+      followSite: z.boolean(),
+      motion: z.boolean(),
       notifyMail: z.boolean(),
       quietStart: hhmm,
       quietEnd: hhmm,
@@ -175,6 +205,23 @@ const profilePatch = z.object({
     .optional(),
   password: z.object({ current: z.string(), next: z.string().min(8, '密码至少 8 位').max(200) }).optional(),
 });
+
+// 登录失败限流：同一邮箱 15 分钟内失败 10 次、同一 IP 失败 30 次后暂时拒绝。
+// 按邮箱计数可以防止换 IP（或伪造 X-Forwarded-For）绕过。
+const failures = new Map<string, { n: number; until: number }>();
+const WINDOW = 15 * 60_000;
+const limited = (key: string, max: number) => {
+  const f = failures.get(key);
+  return !!f && f.until > Date.now() && f.n >= max;
+};
+const fail = (key: string) => {
+  const f = failures.get(key);
+  if (!f || f.until < Date.now()) failures.set(key, { n: 1, until: Date.now() + WINDOW });
+  else f.n++;
+  if (failures.size > 10_000) for (const [k, v] of failures) if (v.until < Date.now()) failures.delete(k);
+};
+/** 邮箱不存在时也算一次哈希，避免通过响应时间判断哪些邮箱注册过 */
+let dummyHash: Promise<string> | null = null;
 
 export async function authRoutes(app: FastifyInstance) {
   /** 登录页需要的信息：站点外观、能否注册、是否需要邀请码 */
@@ -200,6 +247,8 @@ export async function authRoutes(app: FastifyInstance) {
       const inv = body.invite && (await one('SELECT code FROM invites WHERE code = ? AND used_by IS NULL AND (expires_at IS NULL OR expires_at > UTC_TIMESTAMP())', [body.invite.toUpperCase()]));
       if (!inv) return reply.code(403).send({ error: '邀请码无效或已被使用' });
     }
+    if (limited(`r:${req.ip}`, 10)) return reply.code(429).send({ error: '注册太频繁，请稍后再试' });
+    fail(`r:${req.ip}`);
     if (await one('SELECT id FROM users WHERE email = ?', [body.email])) {
       return reply.code(409).send({ error: '该邮箱已注册' });
     }
@@ -210,10 +259,15 @@ export async function authRoutes(app: FastifyInstance) {
       count === 0 ? 1 : 0,
       site.defaultTimezone,
       // 新用户沿用站点的默认主题和强调色
-      JSON.stringify({ theme: site.theme, accent: site.accent }),
+      JSON.stringify({ theme: site.theme, accent: site.accent, followSite: true }),
     ]);
     if (count > 0 && site.registration === 'invite') {
-      await exec('UPDATE invites SET used_by = ?, used_at = UTC_TIMESTAMP() WHERE code = ?', [res.insertId, body.invite!.toUpperCase()]);
+      // 同一个邀请码被同时使用时只有一个能成功
+      const claim = await exec('UPDATE invites SET used_by = ?, used_at = UTC_TIMESTAMP() WHERE code = ? AND used_by IS NULL', [res.insertId, body.invite!.toUpperCase()]);
+      if (!claim.affectedRows) {
+        await exec('DELETE FROM users WHERE id = ?', [res.insertId]);
+        return reply.code(403).send({ error: '邀请码无效或已被使用' });
+      }
     }
     await startSession(req, reply, res.insertId);
     return publicUser((await getUser(res.insertId))!);
@@ -221,10 +275,17 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.post('/api/auth/login', async (req, reply) => {
     const body = z.object({ email: z.string().trim().toLowerCase(), password: z.string() }).parse(req.body);
+    const keys = [`e:${body.email}`, `i:${req.ip}`];
+    if (limited(keys[0], 10) || limited(keys[1], 30)) return reply.code(429).send({ error: '失败次数太多，请 15 分钟后再试' });
     const row = await one('SELECT * FROM users WHERE email = ?', [body.email]);
-    if (!row || !(await verifyPassword(body.password, row.password_hash))) {
+    const ok = row
+      ? await verifyPassword(body.password, row.password_hash)
+      : await verifyPassword(body.password, await (dummyHash ??= hashPassword('orbox-dummy'))).then(() => false);
+    if (!row || !ok) {
+      keys.forEach(fail);
       return reply.code(401).send({ error: '邮箱或密码错误' });
     }
+    failures.delete(keys[0]);
     if (row.disabled) return reply.code(403).send({ error: '这个账号已被管理员停用' });
     await exec('UPDATE users SET last_login_at = UTC_TIMESTAMP() WHERE id = ?', [row.id]);
     await startSession(req, reply, Number(row.id));
@@ -240,6 +301,21 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.get('/api/me', { preHandler: requireUser }, async (req) => publicUser(req.user));
 
+  app.get('/api/me/sessions', { preHandler: requireUser }, async (req) => {
+    const cur = sha256(req.cookies[COOKIE] || '');
+    const rows = await query<{ id: string; user_agent: string; created_at: string }>(
+      'SELECT id, user_agent, created_at FROM sessions WHERE user_id = ? AND expires_at > UTC_TIMESTAMP() ORDER BY created_at DESC',
+      [req.user.id],
+    );
+    return rows.map((r) => ({ userAgent: r.user_agent, createdAt: r.created_at, current: r.id === cur }));
+  });
+
+  /** 退出其他所有设备 */
+  app.post('/api/me/logout-others', { preHandler: requireUser }, async (req) => {
+    const res = await exec('DELETE FROM sessions WHERE user_id = ? AND id <> ?', [req.user.id, sha256(req.cookies[COOKIE] || '')]);
+    return { ok: true, count: res.affectedRows };
+  });
+
   app.patch('/api/me', { preHandler: requireUser }, async (req, reply) => {
     const body = profilePatch.parse(req.body);
     const user = req.user;
@@ -249,6 +325,8 @@ export async function authRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: '当前密码不正确' });
       }
       await exec('UPDATE users SET password_hash = ? WHERE id = ?', [await hashPassword(body.password.next), user.id]);
+      // 改密码后其他设备全部下线，只保留当前这个
+      await exec('DELETE FROM sessions WHERE user_id = ? AND id <> ?', [user.id, sha256(req.cookies[COOKIE] || '')]);
     }
     await exec('UPDATE users SET name = ?, timezone = ?, settings = ? WHERE id = ?', [
       body.name ?? user.name,

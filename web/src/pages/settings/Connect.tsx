@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Copy, KeyRound, Trash2, X } from 'lucide-react';
 import { useState } from 'react';
 import type { FormEvent } from 'react';
+import { useUser } from '../../App';
 import { api } from '../../api';
 import { copyText, toastError } from '../../lib';
 import { Setting as Row } from './ui';
@@ -15,6 +16,18 @@ interface TokenRow {
 }
 
 export function ConnectPage() {
+  const user = useUser();
+  if (!user.perms.mcp)
+    return (
+      <section className="section">
+        <h2>AI 连接（MCP）</h2>
+        <div className="card empty-hint">管理员没有给你开放 MCP 外部连接。</div>
+      </section>
+    );
+  return <ConnectInner />;
+}
+
+function ConnectInner() {
   const tokens = useQuery({ queryKey: ['tokens'], queryFn: () => api<TokenRow[]>('/tokens') });
   const [name, setName] = useState('');
   const [allowSend, setAllowSend] = useState(false);

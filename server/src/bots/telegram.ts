@@ -81,15 +81,12 @@ export const telegram: Adapter = {
     const { token, proxy } = integration('telegram');
     const agent = proxy ? new HttpsProxyAgent(proxy) : undefined;
     const b = new Bot(token, { client: { baseFetchConfig: { agent, compress: true } } });
-    for (let delay = 5_000; ; delay = Math.min(delay * 2, 5 * 60_000)) {
-      try {
-        await b.init();
-        break;
-      } catch (e: any) {
-        if (e?.error_code === 401 || e?.error_code === 404) throw new Error('Token 无效');
-        console.error(`[telegram] 连接失败（${e.message}），${delay / 1000}s 后重试`);
-        await new Promise((r) => setTimeout(r, delay));
-      }
+    // 连不上时交给 hub 统一按退避时间重试，这里只试一次，后台保存凭据时不会一直卡住
+    try {
+      await b.init();
+    } catch (e: any) {
+      if (e?.error_code === 401 || e?.error_code === 404) throw new Error('Token 无效，请到 @BotFather 重新复制');
+      throw new Error(`连不上 Telegram（${e?.message || e}）${proxy ? '' : '，服务器在国内时需要设置代理'}`);
     }
     b.on('message:text', (ctx) => inboundText('telegram', String(ctx.chat.id), ctx.message.text, ctx.from?.username || ctx.from?.first_name || '', ioFor(ctx)));
     b.on('callback_query:data', (ctx) => inboundAction('telegram', String(ctx.chat?.id ?? ctx.from.id), ctx.callbackQuery.data, ioFor(ctx)));

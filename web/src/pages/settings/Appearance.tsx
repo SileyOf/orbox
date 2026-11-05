@@ -1,6 +1,9 @@
 import { useSaveSettings, useUser } from '../../App';
 import type { UserSettings } from '../../api';
-import { ACCENTS, toastError } from '../../lib';
+import { Palette } from 'lucide-react';
+import { useState } from 'react';
+import { AppearanceDialog } from '../../components/AppearanceDialog';
+import { accentName, toastError } from '../../lib';
 import { Section, Setting, Switch } from './ui';
 
 export function AppearancePage() {
@@ -8,25 +11,14 @@ export function AppearancePage() {
   const save = useSaveSettings();
   const s = user.settings;
   const set = (patch: Partial<UserSettings>) => save({ settings: patch }).catch(toastError);
+  const [look, setLook] = useState(false);
   return (
     <Section title="外观">
       <div className="card">
-        <Setting title="主题">
-          <div className="tabs">
-            {(['system', 'light', 'dark'] as const).map((t) => (
-              <button key={t} className={s.theme === t ? 'active' : ''} onClick={() => set({ theme: t })}>
-                {{ system: '跟随系统', light: '浅色', dark: '深色' }[t]}
-              </button>
-            ))}
-          </div>
-        </Setting>
-        <Setting title="强调色" hint="用于按钮、选中态和未读标记">
-          <div className="swatches">
-            {ACCENTS.map((c) => (
-              <button key={c} className={`swatch${s.accent.toLowerCase() === c ? ' on' : ''}`} style={{ background: c }} onClick={() => set({ accent: c })} title={c} />
-            ))}
-            <input className="swatch-custom" type="color" value={s.accent} onChange={(e) => set({ accent: e.target.value })} title="自定义颜色" />
-          </div>
+        <Setting title="主题与颜色" hint={`${{ system: '自动', light: '浅色', dark: '深色' }[s.theme]} · ${s.surface === 'clear' ? '通透' : '实色'} · ${s.followSite ? '跟随站点' : accentName(s.accent)}`}>
+          <button className="btn" onClick={() => setLook(true)}>
+            <Palette size={15} /> 外观设置
+          </button>
         </Setting>
         <Setting title="按会话分组" hint="同一个话题的往来邮件在列表里折叠成一行">
           <Switch checked={s.threads} onChange={(v) => set({ threads: v })} />
@@ -35,6 +27,7 @@ export function AppearancePage() {
           <Switch checked={s.blockRemoteImages} onChange={(v) => set({ blockRemoteImages: v })} />
         </Setting>
       </div>
+      {look && <AppearanceDialog onClose={() => setLook(false)} />}
     </Section>
   );
 }

@@ -96,7 +96,7 @@ export function NotifyPage() {
     <>
       <Section
         title="通知渠道"
-        hint="每个渠道可以单独选择接收哪些事件（点亮的会推送）。聊天机器人可以直接阅读全文、处理邮件和计划；推送通道只能单向通知。"
+        hint={user.perms.bots ? '每个渠道可以单独选择接收哪些事件（点亮的会推送）。聊天机器人可以直接阅读全文、处理邮件和计划；推送通道只能单向通知。' : '管理员没有给你开放聊天机器人，只能使用下面的推送通道。'}
         action={
           bots.data?.links.length ? (
             <button className="btn sm" onClick={() => api('/bots/test', { body: {} }).then(() => toast('已发送')).catch(toastError)}>

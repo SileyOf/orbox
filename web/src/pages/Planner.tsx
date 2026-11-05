@@ -11,6 +11,8 @@ import { useTasks, useUser } from '../App';
 import { api } from '../api';
 import type { RepeatRule, Task, TaskInput } from '../api';
 import { copyText, dueLabel, toLocalInput, toast, toastError } from '../lib';
+import { NotesView } from './Notes';
+import { KindChips, KindDialog, RecurringView } from './Recurring';
 
 const DAY = 86400_000;
 const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -53,11 +55,22 @@ function group(tasks: Task[]) {
 export function Planner() {
   const user = useUser();
   const navigate = useNavigate();
-  const [tab, setTab] = useState<'open' | 'done'>('open');
+  const [tab, setTab] = useState<'open' | 'cycle' | 'notes' | 'done'>(() => {
+    try {
+      return (sessionStorage.getItem('orbox.plannerTab') as 'open') || 'open';
+    } catch {
+      return 'open';
+    }
+  });
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('orbox.plannerTab', tab);
+    } catch {}
+  }, [tab]);
   const { data: open = [] } = useTasks('open');
   const { data: done = [] } = useTasks('done');
   const [quick, setQuick] = useState('');
-  const [editing, setEditing] = useState<Task | 'new' | null>(null);
+  const [editing, setEditing] = useState<Task | 'new' | { kind: 'bill' | 'birthday' } | null>(null);
   const [day, setDay] = useState<Date | null>(null);
   const [tag, setTag] = useState<string | null>(null);
   const [month, setMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
@@ -89,7 +102,11 @@ export function Planner() {
   const doneToday = done.filter((t) => t.completed_at && new Date(t.completed_at).getTime() >= todayStart).length;
 
   // 当前列表里任务的显示顺序，拖选和 Shift 连选按这个顺序计算
-  const ordered = useMemo(() => (tab === 'open' ? groups.flatMap((g) => g.tasks) : done), [tab, groups, done]);
+  const cycle = useMemo(
+    () => [...open.filter((t) => t.kind === 'bill'), ...open.filter((t) => t.kind === 'birthday'), ...open.filter((t) => t.kind === 'task' && t.repeat_rule)],
+    [open],
+  );
+  const ordered = useMemo(() => (tab === 'open' ? groups.flatMap((g) => g.tasks) : tab === 'cycle' ? cycle : tab === 'done' ? done : []), [tab, groups, done, cycle]);
   const listRef = useRef<HTMLDivElement>(null);
   const sel = useSelection(useMemo(() => ordered.map((t) => t.id), [ordered]), listRef);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
@@ -117,7 +134,7 @@ export function Planner() {
     const isDone = t.status === 'done';
     const items: MenuItem[] = [];
     if (!single) items.push({ heading: true, label: `已选 ${ids.length} 项` });
-    items.push(isDone ? { label: '恢复为未完成', icon: RotateCcw, onClick: () => bulk(ids, 'reopen') } : { label: single ? '完成' : '全部完成', icon: Check, onClick: () => bulk(ids, 'complete') });
+    items.push(isDone ? { label: '恢复为未完成', icon: RotateCcw, onClick: () => bulk(ids, 'reopen') } : { label: single ? (t.kind === 'bill' ? '已付' : '完成') : '全部完成', icon: Check, onClick: () => bulk(ids, 'complete') });
     if (single) items.push({ label: '编辑', icon: Pencil, onClick: () => setEditing(t) });
     if (!isDone) items.push({ label: '稍后提醒', icon: BellRing, children: SNOOZE.map(([label, m]) => ({ label, onClick: () => bulk(ids, m) })) });
     if (single && t.repeat_rule && !isDone) items.push({ label: '跳过这一次', icon: SkipForward, onClick: () => act(`/tasks/${t.id}/skip`) });
@@ -157,10 +174,16 @@ export function Planner() {
             <h1 className="grow">计划</h1>
             <div className="tabs">
               <button className={tab === 'open' ? 'active' : ''} onClick={() => setTab('open')}>待办 {open.length || ''}</button>
+              <button className={tab === 'cycle' ? 'active' : ''} onClick={() => setTab('cycle')}>周期</button>
+              <button className={tab === 'notes' ? 'active' : ''} onClick={() => setTab('notes')}>简单记</button>
               <button className={tab === 'done' ? 'active' : ''} onClick={() => setTab('done')}>已完成</button>
             </div>
           </div>
 
+          {tab === 'notes' ? (
+            <NotesView />
+          ) : (
+          <>
           <form className="card quick-add" onSubmit={quickAdd}>
             <Plus size={18} className="muted" />
             <input value={quick} onChange={(e) => setQuick(e.target.value)} placeholder="明天9点 交报告 —— 直接写时间和事项，回车添加" />
@@ -217,12 +240,16 @@ export function Planner() {
                 </div>
               )}
             </>
+          ) : tab === 'cycle' ? (
+            <RecurringView tasks={open} onEdit={setEditing} row={row} />
           ) : done.length ? (
             <div className="card task-list">{done.map(row)}</div>
           ) : (
             <div className="empty" style={{ height: 280 }}>还没有完成的任务</div>
           )}
           </div>
+          </>
+          )}
         </div>
       </div>
 
@@ -238,7 +265,11 @@ export function Planner() {
       </aside>
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
-      {editing && <TaskDialog task={editing === 'new' ? null : editing} defaultDay={day} defaultNag={user.settings.nagInterval} onClose={() => setEditing(null)} />}
+      {editing && editing !== 'new' && editing.kind !== 'task' ? (
+        <KindDialog task={'id' in editing ? editing : null} kind={editing.kind as 'bill' | 'birthday'} onClose={() => setEditing(null)} />
+      ) : editing ? (
+        <TaskDialog task={editing === 'new' ? null : (editing as Task)} defaultDay={day} defaultNag={user.settings.nagInterval} onClose={() => setEditing(null)} />
+      ) : null}
     </div>
   );
 }
@@ -272,7 +303,7 @@ function TaskRow(props: {
       onClick={props.onRowClick}
       onContextMenu={props.onContextMenu}
     >
-      <button className={`check${isDone ? ' on' : ''}${!isDone && t.priority ? ` p${t.priority}` : ''}`} onClick={props.onToggle} title={isDone ? '恢复为未完成' : '完成'}>
+      <button className={`check${isDone ? ' on' : ''}${!isDone && t.priority ? ` p${t.priority}` : ''}`} onClick={props.onToggle} title={isDone ? '恢复为未完成' : t.kind === 'bill' ? '已付，滚动到下一期' : t.kind === 'birthday' ? '已祝福，明年再提醒' : '完成'}>
         {isDone ? <Check size={14} strokeWidth={3} /> : <Check size={13} strokeWidth={3} />}
       </button>
       <div className="task-body">
@@ -280,7 +311,8 @@ function TaskRow(props: {
         {t.notes && <div className="muted small" style={{ whiteSpace: 'pre-wrap', marginTop: 2 }}>{t.notes}</div>}
         <div className="task-meta">
           {t.due_at && <span className={`chip${overdue ? ' danger' : ''}`}><AlarmClock size={12} /> {dueLabel(t.due_at)}</span>}
-          {t.repeat_rule && <span className="chip"><Repeat size={12} /> {repeatLabel(t.repeat_rule)}</span>}
+          {t.repeat_rule && t.kind === 'task' && <span className="chip"><Repeat size={12} /> {repeatLabel(t.repeat_rule)}</span>}
+          {t.kind !== 'task' && !isDone && <KindChips task={t} />}
           {(t.tags || []).map((name) => (
             <span key={name} className="chip tag" onClick={(e) => (e.stopPropagation(), props.onTag(name))}><Hash size={11} />{name}</span>
           ))}

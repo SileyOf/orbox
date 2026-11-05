@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { requireUser } from '../auth.js';
+import { requirePerm, requireUser } from '../auth.js';
 import { exec, one } from '../db.js';
 import { sendChannel } from '../notify/channels.js';
 import { digestCard } from '../bots/cards.js';
@@ -8,14 +8,16 @@ import { bindHints, botStatus, createBindCode, linksOf, sendToUser, unbind } fro
 import { parseQuickTask } from '../tasks/parse.js';
 import { siteConfig } from '../site.js';
 import {
-  completeTask, createTask, deleteTask, listTasks, reopenTask, repeatRule, skipTask, snoozeTask, updateTask,
+  TASK_KINDS, completeTask, createTask, deleteTask, listTasks, reopenTask, repeatRule, skipTask, snoozeTask, taskMeta, updateTask,
 } from '../tasks/service.js';
 
 const taskBody = z.object({
+  kind: z.enum(TASK_KINDS).optional(),
+  meta: taskMeta.nullish(),
   title: z.string().trim().min(1, '请填写事项').max(500),
   notes: z.string().max(5000).nullish(),
   dueAt: z.coerce.date().nullish(),
-  remindBefore: z.number().int().min(0).max(10080).optional(),
+  remindBefore: z.number().int().min(0).max(60 * 24 * 60).optional(),
   repeat: repeatRule.nullish(),
   priority: z.number().int().min(0).max(2).optional(),
   tags: z.array(z.string().trim().min(1).max(30)).max(10).optional(),
@@ -92,6 +94,7 @@ export async function taskRoutes(app: FastifyInstance) {
 
   /** 生成绑定码，并给出每个已启用平台的绑定方式 */
   app.post('/api/bots/code', async (req) => {
+    requirePerm(req.user, 'bots', '聊天机器人');
     const code = await createBindCode(req.user.id);
     return { code, hints: bindHints(code) };
   });

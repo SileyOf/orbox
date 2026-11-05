@@ -19,11 +19,41 @@ import type { Adapter, BotIO, Card, Platform } from './types.js';
 const adapters = (): Adapter[] => [telegram, feishu, discord, slack];
 const adapterOf = (p: string) => adapters().find((a) => a.platform === p);
 
+// 每个平台的连接状态：最近一次失败原因 + 自动重试（30 秒起，逐次翻倍，最长 10 分钟）。
+// 比如飞书应用刚提交发布、还没审核通过，审核通过后不用手动点就能连上。
+const state = new Map<Platform, { error: string | null; at: number; timer?: NodeJS.Timeout; attempt: number }>();
+
+function stateOf(p: Platform) {
+  let s = state.get(p);
+  if (!s) state.set(p, (s = { error: null, at: 0, attempt: 0 }));
+  return s;
+}
+
+async function connect(a: Adapter): Promise<void> {
+  const s = stateOf(a.platform);
+  clearTimeout(s.timer);
+  try {
+    await a.start();
+    s.error = null;
+    s.attempt = 0;
+  } catch (e) {
+    s.error = (e as Error)?.message || String(e);
+    s.at = Date.now();
+    const delay = Math.min(30_000 * 2 ** s.attempt++, 600_000);
+    console.error(`[${a.platform}] 连接失败（${Math.round(delay / 1000)} 秒后重试）：${s.error}`);
+    s.timer = setTimeout(() => {
+      if (a.enabled() && !a.name()) void a.stop().catch(() => {}).then(() => connect(a).catch(() => {}));
+    }, delay);
+    s.timer.unref();
+    throw e;
+  }
+}
+
 export async function startBots() {
   for (const a of adapters()) {
     if (!a.enabled()) continue;
     // 各平台独立启动，一个连不上不影响其他
-    a.start().catch((e) => console.error(`[${a.platform}] 启动失败：`, e?.message || e));
+    connect(a).catch(() => {});
   }
 }
 
@@ -31,8 +61,12 @@ export async function startBots() {
 export async function restartBot(platform: Platform): Promise<void> {
   const a = adapterOf(platform);
   if (!a) return;
+  const s = stateOf(platform);
+  clearTimeout(s.timer);
+  s.attempt = 0;
+  s.error = null;
   await a.stop().catch(() => {});
-  if (a.enabled()) await a.start();
+  if (a.enabled()) await connect(a);
 }
 
 export async function stopBots() {
@@ -40,7 +74,11 @@ export async function stopBots() {
 }
 
 export function botStatus() {
-  return adapters().map((a) => ({ platform: a.platform, label: a.label, enabled: a.enabled(), name: a.name() }));
+  return adapters().map((a) => {
+    const s = state.get(a.platform);
+    const error = a.enabled() && !a.name() ? s?.error || null : null;
+    return { platform: a.platform, label: a.label, enabled: a.enabled(), name: a.name(), error, errorAt: error ? s!.at : null };
+  });
 }
 
 export const linksOf = (userId: number) =>
@@ -53,7 +91,8 @@ export const wants = (user: User | undefined, channel: string, kind?: EventKind)
 /** 发给用户绑定的所有平台（按用户的渠道设置筛选事件）。返回成功送达的平台数 */
 export async function sendToUser(userId: number, cards: Card | Card[], kind?: EventKind): Promise<number> {
   let sent = 0;
-  const user = kind ? await getUser(userId) : undefined;
+  const user = await getUser(userId);
+  if (!user?.perms.bots) return 0;
   for (const link of await linksOf(userId)) {
     const a = adapterOf(link.platform);
     if (!a?.enabled() || !a.name() || !wants(user, link.platform, kind)) continue;

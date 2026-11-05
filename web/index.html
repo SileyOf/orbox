@@ -18,6 +18,8 @@
         document.documentElement.dataset.theme = dark ? 'dark' : 'light';
         var a = localStorage.getItem('orbox.accent');
         if (a) document.documentElement.style.setProperty('--accent', a);
+        document.documentElement.dataset.surface = localStorage.getItem('orbox.surface') || 'solid';
+        document.documentElement.dataset.motion = localStorage.getItem('orbox.motion') || 'on';
       } catch (e) {}
     </script>
   </head>

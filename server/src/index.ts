@@ -1,3 +1,5 @@
+import { installLogger } from './log.js';
+installLogger();
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +19,7 @@ import { dispatchNewMail } from './notify/dispatch.js';
 import { startBots, stopBots } from './bots/hub.js';
 import { accountRoutes } from './routes/accounts.js';
 import { mailRoutes } from './routes/mail.js';
+import { noteRoutes } from './routes/notes.js';
 import { taskRoutes } from './routes/tasks.js';
 import { aiRoutes } from './routes/ai.js';
 import { mcpRoutes } from './routes/mcp.js';
@@ -31,8 +34,28 @@ app.setErrorHandler((err: any, _req, reply) => {
     return reply.code(400).send({ error: err.issues[0]?.message || '参数不正确' });
   }
   if (err.statusCode && err.statusCode < 500) return reply.code(err.statusCode).send({ error: err.message });
-  app.log.error(err);
+  console.error('[http]', err?.stack || err);
   return reply.code(500).send({ error: err.message || '服务器内部错误' });
+});
+
+// 通用安全响应头：禁止被其他站点嵌入（防点击劫持）、禁止 MIME 嗅探、跨站时不带完整来源地址
+app.addHook('onSend', async (_req, reply) => {
+  if (!reply.hasHeader('X-Content-Type-Options')) reply.header('X-Content-Type-Options', 'nosniff');
+  if (!reply.hasHeader('X-Frame-Options')) reply.header('X-Frame-Options', 'SAMEORIGIN');
+  if (!reply.hasHeader('Referrer-Policy')) reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+});
+
+// 跨站请求防护：改数据的请求如果带了 Origin，必须来自本站（同站的其他子域名也不行）。
+// Cookie 的 SameSite=Lax 已挡住其他网站，这里再防一层同主域下的其他子站。
+const allowedOrigins = new Set([new URL(config.publicUrl).origin]);
+app.addHook('onRequest', async (req, reply) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method) || !req.url.startsWith('/api/')) return;
+  const origin = req.headers.origin;
+  if (!origin) return;
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  const proto = req.headers['x-forwarded-proto'] || req.protocol;
+  if (allowedOrigins.has(origin) || origin === `${proto}://${host}`) return;
+  return reply.code(403).send({ error: '跨站请求被拒绝' });
 });
 
 await app.register(cookie);
@@ -41,6 +64,7 @@ await app.register(authRoutes);
 await app.register(accountRoutes);
 await app.register(mailRoutes);
 await app.register(taskRoutes);
+await app.register(noteRoutes);
 await app.register(aiRoutes);
 await app.register(mcpRoutes);
 await app.register(publicRoutes);

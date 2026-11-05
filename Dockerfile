@@ -17,6 +17,7 @@ RUN npm ci --omit=dev -w server && npm cache clean --force
 COPY --from=build /app/server/dist server/dist
 COPY --from=build /app/server/migrations server/migrations
 COPY --from=build /app/web/dist web/dist
+RUN mkdir -p /app/logs && chown node:node /app/logs
 USER node
 EXPOSE 8787
 CMD ["node", "server/dist/index.js"]

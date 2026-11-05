@@ -30,6 +30,7 @@ export async function mcpRoutes(app: FastifyInstance) {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     const row = token ? await one<{ id: number; user_id: number; allow_send: number }>('SELECT id, user_id, allow_send FROM api_tokens WHERE token_hash = ?', [sha256(token)]) : undefined;
     const user = row && (await getUser(Number(row.user_id)));
+    if (user && !user.perms.mcp) return reply.code(403).send({ jsonrpc: '2.0', error: { code: -32001, message: '管理员没有给你开放 MCP 外部连接' }, id: null });
     if (!row || !user) return reply.code(401).send({ jsonrpc: '2.0', error: { code: -32001, message: '令牌无效，请在 Orbox 设置 → AI 连接 里生成' }, id: null });
     void touchToken(row.id);
 

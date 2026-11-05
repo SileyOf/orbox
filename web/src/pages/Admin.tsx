@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Bot, Copy, ExternalLink, Gauge, ImageUp, KeyRound, Palette, Pencil, Plus, QrCode, Trash2, Users } from 'lucide-react';
+import { ArrowLeft, Bot, Copy, Download, ExternalLink, Gauge, ImageUp, KeyRound, LogOut, Palette, Pencil, Plus, QrCode, RefreshCw, ScrollText, Trash2, Users } from 'lucide-react';
 import QRCode from 'qrcode';
 import { useEffect, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
@@ -19,12 +19,13 @@ const SECTIONS = [
   { id: 'users', label: '注册与用户', icon: Users },
   { id: 'integrations', label: '集成', icon: Bot },
   { id: 'models', label: '共享模型', icon: KeyRound },
+  { id: 'logs', label: '运行日志', icon: ScrollText },
 ];
 
 export function Admin() {
   const user = useUser();
   const { section = 'overview' } = useParams();
-  const Page = { overview: Overview, site: SitePage, users: UsersPage, integrations: Integrations, models: Models }[section] ?? Overview;
+  const Page = { overview: Overview, site: SitePage, users: UsersPage, integrations: Integrations, models: Models, logs: Logs }[section] ?? Overview;
   return (
     <div className="settings-layout">
       <nav className="settings-nav">
@@ -60,9 +61,22 @@ interface OverviewData {
   messages: number;
   tasks: number;
   dbSize: number;
-  bots: { platform: string; label: string; enabled: boolean; name: string | null }[];
+  bots: BotState[];
   publicUrl: string;
 }
+
+interface BotState {
+  platform: string;
+  label: string;
+  enabled: boolean;
+  name: string | null;
+  error: string | null;
+  errorAt: number | null;
+}
+
+/** 平台连接状态的一句话说明 */
+const botHint = (s?: BotState) =>
+  !s?.enabled ? '未配置' : s.name ? `✅ 已连接 · ${s.name}` : s.error ? `⚠️ 连接失败（会自动重试）：${s.error}` : '已配置，正在连接…';
 
 const size = (n: number) => (n > 1 << 30 ? `${(n / (1 << 30)).toFixed(1)} GB` : `${(n / (1 << 20)).toFixed(1)} MB`);
 const duration = (s: number) => (s > 86400 ? `${Math.floor(s / 86400)} 天` : s > 3600 ? `${Math.floor(s / 3600)} 小时` : `${Math.floor(s / 60)} 分钟`);
@@ -97,7 +111,7 @@ function Overview() {
       <Section title="聊天平台">
         <div className="card">
           {d.bots.map((b) => (
-            <Setting key={b.platform} title={b.label} hint={!b.enabled ? '未配置' : b.name ? `已连接 · ${b.name}` : '已配置，正在连接或连接失败'}>
+            <Setting key={b.platform} title={b.label} hint={botHint(b)}>
               <NavLink className="btn sm" to={`/${user.adminPath}/integrations`}>配置</NavLink>
             </Setting>
           ))}
@@ -121,6 +135,48 @@ interface SiteConfig {
   registration: 'open' | 'invite' | 'closed';
   defaultTimezone: string;
   shareAi: boolean;
+  defaultPerms: Perms;
+}
+
+interface Perms {
+  maxAccounts: number;
+  sharedAi: boolean;
+  ownAi: boolean;
+  bots: boolean;
+  mcp: boolean;
+  privateHosts: boolean;
+}
+
+const PERM_ITEMS: { key: Exclude<keyof Perms, 'maxAccounts'>; title: string; hint: string }[] = [
+  { key: 'sharedAi', title: '使用共享模型', hint: '用管理员在"共享模型"里配置的服务（还需要开启"开放共享模型"）' },
+  { key: 'ownAi', title: '自己添加模型服务', hint: '在 设置 → AI 里填写自己的 API Key' },
+  { key: 'bots', title: '聊天机器人', hint: '绑定 Telegram、飞书等，接收推送和对话' },
+  { key: 'mcp', title: 'MCP 外部连接', hint: '生成令牌，让 Hermes、Claude Desktop 等外部 AI 读写邮件和计划' },
+  { key: 'privateHosts', title: '允许连接内网地址', hint: '邮箱服务器、模型接口可以填 127.0.0.1、192.168.x.x 等。有探测服务器内网的风险，只给信任的人' },
+];
+
+function PermsEditor({ value, onChange, disabled }: { value: Perms; onChange: (p: Perms) => void; disabled?: boolean }) {
+  return (
+    <>
+      <Setting title="邮箱数量上限" hint="0 表示不限">
+        <input
+          className="input"
+          type="number"
+          min={0}
+          max={100}
+          style={{ width: 90 }}
+          disabled={disabled}
+          value={value.maxAccounts}
+          onChange={(e) => onChange({ ...value, maxAccounts: Math.max(0, Math.min(100, Number(e.target.value) || 0)) })}
+        />
+      </Setting>
+      {PERM_ITEMS.map((p) => (
+        <Setting key={p.key} title={p.title} hint={p.hint}>
+          <Switch checked={value[p.key]} disabled={disabled} onChange={(v) => onChange({ ...value, [p.key]: v })} />
+        </Setting>
+      ))}
+    </>
+  );
 }
 
 function useSiteConfig() {
@@ -231,7 +287,124 @@ interface AdminUser {
   disabled: number;
   created_at: string;
   last_login_at: string | null;
+  last_seen_at: string | null;
   accounts: number;
+  sessions: number;
+  bots: number;
+  tokens: number;
+  custom: boolean;
+  perms: Perms;
+}
+
+const ago = (iso: string) => {
+  const m = (Date.now() - new Date(iso).getTime()) / 60_000;
+  return m < 5 ? '刚刚' : m < 60 ? `${Math.floor(m)} 分钟前` : m < 1440 ? `${Math.floor(m / 60)} 小时前` : m < 43200 ? `${Math.floor(m / 1440)} 天前` : new Date(iso).toLocaleDateString();
+};
+
+function UserDialog({ user, defaults, self, onClose, onChanged }: { user: AdminUser; defaults: Perms; self: boolean; onClose: () => void; onChanged: () => void }) {
+  const [f, setF] = useState({ name: user.name, email: user.email, isAdmin: !!user.is_admin, disabled: !!user.disabled, custom: user.custom, perms: user.perms });
+  const [busy, setBusy] = useState(false);
+  const set = (patch: Partial<typeof f>) => setF({ ...f, ...patch });
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const body: Record<string, unknown> = { perms: f.custom ? f.perms : null };
+      if (f.name !== user.name) body.name = f.name;
+      if (f.email !== user.email) body.email = f.email;
+      if (!self) Object.assign(body, { isAdmin: f.isAdmin, disabled: f.disabled });
+      await api(`/admin/users/${user.id}`, { method: 'PATCH', body });
+      toast('已保存');
+      onChanged();
+      onClose();
+    } catch (err) {
+      toastError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resetPassword() {
+    if (!confirm(`为 ${user.email} 生成一个临时密码？他所有已登录的设备会下线。`)) return;
+    try {
+      const r = await api<{ password: string }>(`/admin/users/${user.id}/reset-password`, { method: 'POST' });
+      prompt('临时密码（请转交给用户，登录后在 设置 → 账户 修改）', r.password);
+      onChanged();
+    } catch (err) {
+      toastError(err);
+    }
+  }
+
+  const logout = () =>
+    api<{ count: number }>(`/admin/users/${user.id}/logout`, { method: 'POST' })
+      .then((r) => (toast(r.count ? `已让 ${r.count} 个设备下线` : '这个用户当前没有登录的设备'), onChanged()))
+      .catch(toastError);
+
+  const remove = () =>
+    confirm(`删除 ${user.email}？他的邮箱配置、计划、简单记和缓存都会被删除（服务器上的邮件不受影响），无法恢复。`) &&
+    api(`/admin/users/${user.id}`, { method: 'DELETE' })
+      .then(() => (onChanged(), onClose()))
+      .catch(toastError);
+
+  return (
+    <div className="backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <form className="dialog" style={{ width: 'min(600px, 100%)' }} onSubmit={submit}>
+        <h2>编辑用户</h2>
+        <div className="grid2">
+          <label className="field">
+            <span>名字</span>
+            <input className="input" required maxLength={100} value={f.name} onChange={(e) => set({ name: e.target.value })} />
+          </label>
+          <label className="field">
+            <span>登录邮箱</span>
+            <input className="input" type="email" required value={f.email} onChange={(e) => set({ email: e.target.value })} />
+          </label>
+        </div>
+        <div className="card" style={{ padding: '2px 16px' }}>
+          <Setting title="管理员" hint={self ? '不能取消自己的管理员身份' : '可以进入后台，不受下面的权限限制'}>
+            <Switch checked={f.isAdmin} disabled={self} onChange={(v) => set({ isAdmin: v })} />
+          </Setting>
+          <Setting title="停用账号" hint="停用后立即下线，不能再登录，推送也会停止">
+            <Switch checked={f.disabled} disabled={self} onChange={(v) => set({ disabled: v })} />
+          </Setting>
+        </div>
+        {!f.isAdmin && (
+          <div className="card" style={{ padding: '2px 16px' }}>
+            <Setting title="单独设置权限" hint={f.custom ? '这个用户使用下面的权限' : '跟随"默认权限"，修改默认权限时一起变'}>
+              <Switch checked={f.custom} onChange={(v) => set({ custom: v, perms: v ? f.perms : defaults })} />
+            </Setting>
+            <PermsEditor value={f.custom ? f.perms : defaults} disabled={!f.custom} onChange={(perms) => set({ perms })} />
+          </div>
+        )}
+        <div className="muted small">
+          {user.sessions} 个设备登录中 · {user.accounts} 个邮箱 · {user.bots} 个机器人绑定 · {user.tokens} 个 MCP 令牌
+        </div>
+        <div className="dialog-foot" style={{ flexWrap: 'wrap' }}>
+          {!self && (
+            <>
+              <button type="button" className="btn ghost sm" onClick={resetPassword}>
+                <KeyRound size={14} /> 重置密码
+              </button>
+              <button type="button" className="btn ghost sm" onClick={logout} disabled={!user.sessions}>
+                <LogOut size={14} /> 退出所有设备
+              </button>
+              <button type="button" className="btn ghost sm danger" onClick={remove}>
+                <Trash2 size={14} /> 删除
+              </button>
+            </>
+          )}
+          <span className="grow" />
+          <button type="button" className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button className="btn primary" disabled={busy}>
+            保存
+          </button>
+        </div>
+      </form>
+    </div>
+  );
 }
 
 function UsersPage() {
@@ -245,17 +418,12 @@ function UsersPage() {
 
   const setSite = (patch: Partial<SiteConfig>) =>
     api<SiteConfig>('/admin/site', { method: 'PUT', body: patch }).then((s) => qc.setQueryData(['admin-site'], s)).catch(toastError);
-  const patch = (id: number, body: object) => api(`/admin/users/${id}`, { method: 'PATCH', body }).then(() => users.refetch()).catch(toastError);
 
-  async function reset(u: AdminUser) {
-    if (!confirm(`为 ${u.email} 生成一个临时密码？他所有已登录的设备会下线。`)) return;
-    try {
-      const r = await api<{ password: string }>(`/admin/users/${u.id}/reset-password`, { method: 'POST' });
-      prompt('临时密码（请转交给用户，登录后在 设置 → 账户 修改）', r.password);
-    } catch (e) {
-      toastError(e);
-    }
-  }
+  const [editing, setEditing] = useState<AdminUser | null>(null);
+  const [perms, setPerms] = useState<Perms | null>(null);
+  useEffect(() => {
+    if (site.data) setPerms(site.data.defaultPerms);
+  }, [site.data]);
 
   return (
     <>
@@ -308,30 +476,38 @@ function UsersPage() {
       )}
       <Section title={`用户（${users.data?.length ?? 0}）`}>
         <div className="card">
-          {(users.data || []).map((u) => (
-            <Setting
-              key={u.id}
-              title={<>{u.name} <span className="muted small">{u.email}</span> {u.is_admin ? <span className="chip accent" style={{ height: 20 }}>管理员</span> : null} {u.disabled ? <span className="chip danger" style={{ height: 20 }}>已停用</span> : null}</>}
-              hint={`${u.accounts} 个邮箱 · 注册于 ${new Date(u.created_at).toLocaleDateString()} · ${u.last_login_at ? `最近登录 ${new Date(u.last_login_at).toLocaleString()}` : '从未登录'}`}
-            >
-              {u.id !== me.id && (
-                <>
-                  <button className="btn ghost sm" onClick={() => patch(u.id, { isAdmin: !u.is_admin })}>{u.is_admin ? '取消管理员' : '设为管理员'}</button>
-                  <button className="btn ghost sm" onClick={() => patch(u.id, { disabled: !u.disabled })}>{u.disabled ? '启用' : '停用'}</button>
-                  <button className="btn ghost sm" onClick={() => reset(u)}>重置密码</button>
-                  <button
-                    className="icon-btn"
-                    title="删除用户"
-                    onClick={() => confirm(`删除 ${u.email}？他的邮箱配置、计划和缓存都会被删除（服务器上的邮件不受影响），无法恢复。`) && api(`/admin/users/${u.id}`, { method: 'DELETE' }).then(() => users.refetch()).catch(toastError)}
-                  >
-                    <Trash2 size={15} />
-                  </button>
-                </>
-              )}
-            </Setting>
-          ))}
+          {(users.data || []).map((u) => {
+            const seen = u.last_seen_at || u.last_login_at;
+            const limits = !u.is_admin && u.custom ? '单独权限' : '';
+            return (
+              <Setting
+                key={u.id}
+                title={
+                  <>
+                    {u.name} <span className="muted small">{u.email}</span> {u.is_admin ? <span className="chip accent" style={{ height: 20 }}>管理员</span> : null}{' '}
+                    {u.disabled ? <span className="chip danger" style={{ height: 20 }}>已停用</span> : null} {limits && <span className="chip" style={{ height: 20 }}>{limits}</span>}
+                  </>
+                }
+                hint={`${u.accounts} 个邮箱 · 注册于 ${new Date(u.created_at).toLocaleDateString()} · ${seen ? `最近活跃 ${ago(seen)}` : '还没有登录过'}${u.sessions ? ` · ${u.sessions} 个设备在线` : ''}`}
+              >
+                <button className="btn ghost sm" onClick={() => setEditing(u)}>
+                  <Pencil size={14} /> 编辑
+                </button>
+              </Setting>
+            );
+          })}
         </div>
       </Section>
+      {perms && (
+        <Section title="默认权限" hint="新用户和没有单独设置权限的用户使用这里的权限；管理员不受限制">
+          <div className="card">
+            <PermsEditor value={perms} onChange={(p) => (setPerms(p), setSite({ defaultPerms: p }).then(() => users.refetch()))} />
+          </div>
+        </Section>
+      )}
+      {editing && site.data && (
+        <UserDialog user={editing} defaults={site.data.defaultPerms} self={editing.id === me.id} onClose={() => setEditing(null)} onChanged={() => users.refetch()} />
+      )}
     </>
   );
 }
@@ -346,7 +522,7 @@ interface IntegrationsData {
     slack: { botToken: string; appToken: string };
     microsoft: { clientId: string; clientSecret: string };
   };
-  status: { platform: string; label: string; enabled: boolean; name: string | null }[];
+  status: BotState[];
   discordInvite: string | null;
   microsoftRedirect: string;
   slackManifest: object;
@@ -450,13 +626,15 @@ function FeishuQr({ lark, onDone }: { lark: boolean; onDone: () => void }) {
 }
 
 function Integrations() {
-  const q = useQuery({ queryKey: ['admin-integrations'], queryFn: () => api<IntegrationsData>('/admin/integrations') });
+  // 有平台正在连接 / 重试时定时刷新状态
+  const q = useQuery({
+    queryKey: ['admin-integrations'],
+    queryFn: () => api<IntegrationsData>('/admin/integrations'),
+    refetchInterval: (query) => (query.state.data?.status.some((x) => x.enabled && !x.name) ? 10_000 : false),
+  });
   const d = q.data;
   if (!d) return <div className="muted">加载中…</div>;
-  const status = (p: string) => {
-    const s = d.status.find((x) => x.platform === p);
-    return !s?.enabled ? '未配置' : s.name ? `✅ 已连接 · ${s.name}` : '已配置，但还没连上（检查凭据或网络，日志里有原因）';
-  };
+  const status = (p: string) => botHint(d.status.find((x) => x.platform === p));
   const refetch = () => q.refetch();
   const v = d.values;
 
@@ -486,7 +664,8 @@ function Integrations() {
             <FeishuQr lark onDone={refetch} />
           </div>
           <Steps>
-            <li>扫码创建后（或手动创建企业自建应用后），到 <a href={v.feishu.appId ? `https://open.${v.feishu.domain === 'lark' ? 'larksuite' : 'feishu'}.cn/app/${v.feishu.appId}` : 'https://open.feishu.cn/app'} target="_blank" rel="noopener noreferrer">开放平台的应用页面 <ExternalLink size={12} /></a>：</li>
+            <li>扫码创建后（或手动创建企业自建应用后），到 <a href={`${v.feishu.domain === 'lark' ? 'https://open.larksuite.com' : 'https://open.feishu.cn'}/app${v.feishu.appId ? `/${v.feishu.appId}` : ''}`} target="_blank" rel="noopener noreferrer">开放平台的应用页面 <ExternalLink size={12} /></a>：</li>
+            <li><b>添加应用能力 → 机器人</b>（没开机器人能力会报"could not resolve bot identity"）。</li>
             <li>事件与回调 → <b>事件配置</b>和<b>回调配置</b>的订阅方式都选"使用长连接接收"，并确认已添加事件 <code>im.message.receive_v1</code>、回调 <code>card.action.trigger</code>（要在这里显示"已连接"之后再切换）。</li>
             <li>权限管理确认已开通 <code>im:message</code>、<code>im:message.p2p_msg:readonly</code>、<code>im:message:send_as_bot</code>、<code>im:resource</code>。</li>
             <li>创建版本并发布（企业管理员审核通过后生效）。</li>
@@ -615,5 +794,84 @@ function Models() {
         />
       )}
     </>
+  );
+}
+
+// ---------------- 运行日志 ----------------
+
+interface LogLine {
+  t: number;
+  level: 'info' | 'warn' | 'error';
+  msg: string;
+}
+
+function Logs() {
+  const [level, setLevel] = useState<'info' | 'warn' | 'error'>('info');
+  const [q, setQ] = useState('');
+  const [auto, setAuto] = useState(true);
+  const logs = useQuery({
+    queryKey: ['admin-logs', level, q],
+    queryFn: () => api<{ lines: LogLine[]; file: string | null }>(`/admin/logs?level=${level}&q=${encodeURIComponent(q)}&limit=1000`),
+    refetchInterval: auto ? 5000 : false,
+  });
+  const lines = logs.data?.lines || [];
+  const download = () => {
+    const text = lines
+      .slice()
+      .reverse()
+      .map((l) => `${new Date(l.t).toISOString()} ${l.level.toUpperCase()} ${l.msg}`)
+      .join('\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    a.download = `orbox-log-${new Date().toISOString().slice(0, 10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  return (
+    <Section
+      title="运行日志"
+      hint={
+        <>
+          最近 3000 行，重启后清空。{logs.data?.file ? <>同时写入容器内 <code>{logs.data.file}</code>（5MB 轮转）。</> : '设置环境变量 LOG_DIR 可同时写入文件。'}
+          命令行查看：<code>docker compose logs -f --tail=200</code>（在 docker-compose.yml 所在目录执行）
+        </>
+      }
+      action={
+        <div className="row">
+          <button className="btn sm" onClick={() => logs.refetch()} title="刷新">
+            <RefreshCw size={14} />
+          </button>
+          <button className="btn sm" onClick={download} disabled={!lines.length}>
+            <Download size={14} /> 下载
+          </button>
+        </div>
+      }
+    >
+      <div className="row" style={{ flexWrap: 'wrap' }}>
+        <div className="tabs">
+          {(['info', 'warn', 'error'] as const).map((l) => (
+            <button key={l} className={level === l ? 'active' : ''} onClick={() => setLevel(l)}>
+              {{ info: '全部', warn: '警告及以上', error: '仅错误' }[l]}
+            </button>
+          ))}
+        </div>
+        <input className="input grow" style={{ minWidth: 160 }} placeholder="搜索，例如 feishu" value={q} onChange={(e) => setQ(e.target.value)} />
+        <label className="row small muted">
+          <Switch checked={auto} onChange={setAuto} /> 自动刷新
+        </label>
+      </div>
+      <div className="card log-view">
+        {lines.length ? (
+          lines.map((l, i) => (
+            <div key={`${l.t}-${i}`} className={`log-line ${l.level}`}>
+              <time>{new Date(l.t).toLocaleString()}</time>
+              <span>{l.msg}</span>
+            </div>
+          ))
+        ) : (
+          <div className="muted" style={{ padding: 16 }}>{logs.isLoading ? '加载中…' : '没有匹配的日志'}</div>
+        )}
+      </div>
+    </Section>
   );
 }

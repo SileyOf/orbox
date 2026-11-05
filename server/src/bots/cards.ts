@@ -7,6 +7,7 @@ import { webviewUrl } from '../mail/webview.js';
 import { siteConfig } from '../site.js';
 import { formatWhen } from '../tasks/parse.js';
 import { dueToday } from '../tasks/service.js';
+import { lunarLabel } from '../tasks/lunar.js';
 import type { TaskRow } from '../tasks/service.js';
 import type { Button, Card } from './types.js';
 import { plain } from './types.js';
@@ -163,15 +164,40 @@ export function taskButtons(id: number): Button[][] {
   ];
 }
 
+const money = (amount: number, currency = 'CNY') =>
+  currency === 'CNY' ? `¥${amount}` : currency === 'USD' ? `$${amount}` : `${amount} ${currency}`;
+
+/** 账单 / 生日的补充说明：金额、付款方式、年龄、农历 */
+function kindLine(user: User, task: TaskRow): string {
+  const m = task.meta || {};
+  if (task.kind === 'bill') {
+    const parts = [m.amount ? `💳 ${money(m.amount, m.currency)}` : '', m.payMethod ? plain(m.payMethod) : ''].filter(Boolean);
+    return parts.length ? `\n${parts.join(' · ')}` : '';
+  }
+  if (task.kind === 'birthday' && task.due_at) {
+    const year = DateTime.fromJSDate(task.due_at, { zone: user.timezone }).year;
+    const parts = [
+      m.lunar ? `农历${lunarLabel(m.lunar)}` : '',
+      m.birthYear ? `${year - m.birthYear} 岁` : '',
+      m.relation ? plain(m.relation) : '',
+    ].filter(Boolean);
+    return parts.length ? `\n🎂 ${parts.join(' · ')}` : '';
+  }
+  return '';
+}
+
 export function taskCard(user: User, task: TaskRow, nth = 0): Card {
   const when = task.due_at ? `\n🕐 ${formatWhen(task.due_at, user.timezone)}` : '';
   const notes = task.notes ? `\n${plain(clip(task.notes, 300))}` : '';
-  return {
-    tone: 'task',
-    title: nth > 0 ? `🔔 还没完成（第 ${nth + 1} 次提醒）` : '⏰ 提醒',
-    text: `**${plain(task.title)}**${when}${notes}`,
-    buttons: taskButtons(task.id),
-  };
+  const title =
+    nth > 0 ? `🔔 还没完成（第 ${nth + 1} 次提醒）` : task.kind === 'bill' ? '💳 账单提醒' : task.kind === 'birthday' ? '🎂 生日提醒' : '⏰ 提醒';
+  const buttons = taskButtons(task.id);
+  if (task.kind === 'bill') {
+    // 账单的"完成"就是"已付"；有续费链接时直接给按钮
+    buttons[0] = buttons[0].map((b) => (b.action?.startsWith('t:d:') ? { ...b, text: '✅ 已付' } : b));
+    if (task.meta?.payUrl) buttons.unshift([{ text: '去付款', url: task.meta.payUrl }]);
+  }
+  return { tone: 'task', title, text: `**${plain(task.title)}**${kindLine(user, task)}${when}${notes}`, buttons };
 }
 
 export async function digestCard(user: User): Promise<Card> {
@@ -238,5 +264,6 @@ export const helpText = () => `我是 ${siteConfig().name} 助手，可以：
 /inbox 未读邮件
 /today 今日计划
 /add 明天9点 交报告 —— 快速新建计划
+记 打车 56 报销 —— 记到简单记（"出差 上海" 开始出差，"出差结束" 结束）
 /reset 开始新的 AI 对话
 /unlink 解除绑定`;

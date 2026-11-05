@@ -1,7 +1,7 @@
 {
   "name": "orbox",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "workspaces": ["server", "web"],
   "scripts": {
     "dev": "npm run dev -w server & npm run dev -w web & wait",

@@ -169,7 +169,7 @@ export function AiPage() {
       <Section
         title="模型服务"
         hint="可以同时接入多个服务：便宜的模型做高频小任务，强的模型做理解和写作。邮件内容会发给对应的服务商。"
-        action={<button className="btn sm" onClick={() => setEditing('new')}><Plus size={15} /> 添加</button>}
+        action={user.perms.ownAi ? <button className="btn sm" onClick={() => setEditing('new')}><Plus size={15} /> 添加</button> : <span className="muted small">管理员没有开放自己添加模型服务</span>}
       >
         <div className="card">
           {providers.map((p) => (

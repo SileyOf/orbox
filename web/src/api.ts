@@ -1,6 +1,11 @@
 export interface UserSettings {
   theme: 'light' | 'dark' | 'system';
   accent: string;
+  surface: 'clear' | 'solid';
+  selection: string;
+  followSite: boolean;
+  motion: boolean;
+  trip?: { name: string; start: string };
   notifyMail: boolean;
   quietStart: string;
   quietEnd: string;
@@ -66,6 +71,8 @@ export interface User {
   settings: UserSettings;
   /** 只有管理员有：后台页面的地址 */
   adminPath?: string;
+  /** 管理员给这个用户开放的功能 */
+  perms: { maxAccounts: number; sharedAi: boolean; ownAi: boolean; bots: boolean; mcp: boolean; privateHosts: boolean };
 }
 
 export interface Folder {
@@ -190,8 +197,24 @@ export interface RepeatRule {
   weekdays?: number[];
 }
 
+export type TaskKind = 'task' | 'bill' | 'birthday';
+
+export interface TaskMeta {
+  amount?: number;
+  currency?: string;
+  payUrl?: string;
+  payMethod?: string;
+  autoNote?: boolean;
+  person?: string;
+  relation?: string;
+  birthYear?: number | null;
+  lunar?: { month: number; day: number } | null;
+}
+
 export interface Task {
   id: number;
+  kind: TaskKind;
+  meta: TaskMeta | null;
   title: string;
   notes: string | null;
   due_at: string | null;
@@ -208,6 +231,8 @@ export interface Task {
 }
 
 export interface TaskInput {
+  kind?: TaskKind;
+  meta?: TaskMeta | null;
   title: string;
   notes?: string | null;
   dueAt?: string | null;
@@ -259,3 +284,24 @@ export const ROLE_NAMES: Record<string, string> = {
 };
 
 export const folderLabel = (f: Pick<Folder, 'role' | 'name'>) => (f.role && ROLE_NAMES[f.role]) || f.name;
+
+export interface Note {
+  id: number;
+  day: string;
+  content: string;
+  amount: string | null;
+  currency: string;
+  category: string;
+  tags: string[] | null;
+  reimbursable: number;
+  reimbursed: number;
+  source: string;
+  created_at: string;
+}
+
+export interface NoteSummary {
+  count: number;
+  spent: number;
+  byCurrency: Record<string, { total: number; reimbursable: number; pending: number; byCategory: Record<string, number> }>;
+  byTag: Record<string, Record<string, number>>;
+}

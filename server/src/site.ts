@@ -21,8 +21,29 @@ export const siteSchema = z.object({
   defaultTimezone: z.string().min(1).max(64),
   /** 允许普通用户使用管理员配置的共享模型 */
   shareAi: z.boolean(),
+  /** 新用户（以及没单独设置过权限的用户）的默认权限 */
+  defaultPerms: z.lazy(() => permsSchema),
 });
 export type SiteConfig = z.infer<typeof siteSchema>;
+
+/** 用户权限。管理员不受限制 */
+export const permsSchema = z.object({
+  /** 最多添加几个邮箱，0 表示不限 */
+  maxAccounts: z.number().int().min(0).max(100),
+  /** 使用管理员配置的共享模型（还需要站点开启"开放共享模型"） */
+  sharedAi: z.boolean(),
+  /** 自己添加模型服务 */
+  ownAi: z.boolean(),
+  /** 绑定聊天机器人 */
+  bots: z.boolean(),
+  /** 生成 MCP 令牌，让外部 AI 连接 */
+  mcp: z.boolean(),
+  /** 允许邮箱服务器、模型接口填写内网 / 本机地址（有内网探测风险，只给信任的人） */
+  privateHosts: z.boolean(),
+});
+export type Perms = z.infer<typeof permsSchema>;
+export const DEFAULT_PERMS: Perms = { maxAccounts: 0, sharedAi: true, ownAi: true, bots: true, mcp: true, privateHosts: false };
+export const ALL_PERMS: Perms = { maxAccounts: 0, sharedAi: true, ownAi: true, bots: true, mcp: true, privateHosts: true };
 
 const RESERVED_PATHS = new Set(['mail', 'planner', 'settings', 'api', 'mcp', 'v', 'assets', 'login']);
 
@@ -38,6 +59,7 @@ const defaults = (): SiteConfig => ({
   registration: config.allowRegistration ? 'open' : 'closed',
   defaultTimezone: 'Asia/Shanghai',
   shareAi: config.ai.shared,
+  defaultPerms: DEFAULT_PERMS,
 });
 
 export interface Integrations {
@@ -69,6 +91,7 @@ export async function loadSite(): Promise<void> {
   const rows = await query<{ k: string; v: any }>('SELECT k, v FROM site_settings');
   const saved = Object.fromEntries(rows.map((r) => [r.k, r.v]));
   site = { ...defaults(), ...(saved.site || {}) };
+  site.defaultPerms = { ...DEFAULT_PERMS, ...(saved.site?.defaultPerms || {}) };
   const env = envIntegrations();
   const db = (saved.integrations || {}) as Record<string, Record<string, string>>;
   integrations = Object.fromEntries(
@@ -122,6 +145,6 @@ export function maskedIntegrations() {
 
 /** 公开给登录页等未登录页面的站点信息（不含后台路径） */
 export function publicSite() {
-  const { adminPath: _hidden, logo, shareAi: _s, ...rest } = site;
+  const { adminPath: _hidden, logo, shareAi: _s, defaultPerms: _p, ...rest } = site;
   return { ...rest, hasLogo: !!logo };
 }

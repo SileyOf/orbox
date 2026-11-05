@@ -11,6 +11,7 @@ import type { SendInput } from '../mail/send.js';
 import { moveMessages, setFlag } from '../routes/mail.js';
 import { completeTask, createTask, listTasks } from '../tasks/service.js';
 import { formatWhen } from '../tasks/parse.js';
+import { CATEGORIES, activeTrip, addNote, listNotes, setTrip, summarize } from '../notes/service.js';
 import type { ToolSpec } from './provider.js';
 
 // 邮件和计划的工具集。内置助手和 MCP 共用同一套定义，
@@ -223,29 +224,51 @@ const TOOLS = [
       return (await listTasks(ctx.user.id, i.status))
         .filter((t) => !limit || (t.due_at && new Date(t.due_at).getTime() <= limit))
         .slice(0, 50)
-        .map((t) => ({ id: t.id, title: t.title, due: t.due_at ? when(t.due_at, ctx.user.timezone) : null, notes: t.notes, tags: t.tags }));
+        .map((t) => ({ id: t.id, kind: t.kind, title: t.title, due: t.due_at ? when(t.due_at, ctx.user.timezone) : null, notes: t.notes, tags: t.tags, meta: t.meta }));
     },
   }),
   tool({
     name: 'create_task',
-    description: '在计划表里新建任务，到点会提醒用户',
+    description:
+      '在计划表里新建计划，到点会提醒用户。kind=bill 是账单 / 续费（每期提醒付款，可带金额），kind=birthday 是生日 / 纪念日（每年提醒，可用农历）。',
     schema: z.object({
-      title: z.string().min(1).max(200),
-      due: z.string().regex(/^\d{4}-\d\d-\d\dT\d\d:\d\d/).optional().describe('用户时区的本地时间，YYYY-MM-DDTHH:mm'),
+      title: z.string().min(1).max(200).describe('例如"交报告"、"Netflix 续费"、"妈妈生日"'),
+      kind: z.enum(['task', 'bill', 'birthday']).default('task'),
+      due: z
+        .string()
+        .regex(/^\d{4}-\d\d-\d\dT\d\d:\d\d/)
+        .optional()
+        .describe('用户时区的本地时间 YYYY-MM-DDTHH:mm；账单是下次付款日，公历生日是下一次生日当天的提醒时间'),
       notes: z.string().max(2000).optional(),
-      remind_before_minutes: z.number().int().min(0).max(10080).optional(),
+      remind_before_minutes: z.number().int().min(0).max(86400).optional().describe('提前多久提醒，账单常用 1–3 天（1440–4320）'),
+      repeat: z.enum(['daily', 'weekly', 'monthly', 'yearly']).optional().describe('普通任务和账单的重复周期；生日固定每年'),
+      amount: z.number().min(0).optional().describe('账单每期金额'),
+      currency: z.string().length(3).optional().describe('账单币种，默认 CNY'),
+      person: z.string().max(60).optional().describe('生日：是谁'),
+      birth_year: z.number().int().optional().describe('生日：出生年份（知道的话，用来算年龄）'),
+      lunar_month: z.number().int().min(1).max(12).optional().describe('农历生日的月份；公历生日不填'),
+      lunar_day: z.number().int().min(1).max(30).optional(),
     }),
     run: async (i, ctx) => {
       const due = i.due ? DateTime.fromISO(i.due.slice(0, 16), { zone: ctx.user.timezone }) : null;
+      const lunar = i.kind === 'birthday' && i.lunar_month && i.lunar_day ? { month: i.lunar_month, day: i.lunar_day } : null;
       const task = await createTask(ctx.user.id, ctx.user.timezone, {
+        kind: i.kind,
         title: i.title,
         notes: i.notes,
         dueAt: due?.isValid ? due.toJSDate() : null,
-        remindBefore: i.remind_before_minutes,
-        nagInterval: ctx.user.settings.nagInterval,
+        remindBefore: i.remind_before_minutes ?? (i.kind === 'task' ? undefined : 1440),
+        repeat: i.kind === 'bill' ? { freq: i.repeat || 'monthly', interval: 1 } : i.repeat ? { freq: i.repeat, interval: 1 } : null,
+        meta:
+          i.kind === 'bill'
+            ? { amount: i.amount, currency: (i.currency || 'CNY').toUpperCase(), autoNote: true }
+            : i.kind === 'birthday'
+              ? { person: i.person || i.title.replace(/的?生日$/, ''), birthYear: i.birth_year ?? null, lunar }
+              : null,
+        nagInterval: i.kind === 'task' ? ctx.user.settings.nagInterval : 0,
         source: ctx.mode === 'mcp' ? 'mcp' : 'ai',
       });
-      return { id: task.id, title: task.title, due: task.due_at ? formatWhen(task.due_at, ctx.user.timezone) : null };
+      return { id: task.id, kind: task.kind, title: task.title, due: task.due_at ? formatWhen(task.due_at, ctx.user.timezone) : null };
     },
   }),
   tool({
@@ -256,6 +279,63 @@ const TOOLS = [
       const t = await completeTask(ctx.user.id, ctx.user.timezone, i.id, ctx.mode);
       if (!t) throw new Error('任务不存在');
       return t.status === 'done' ? '已完成' : `已完成，下次在 ${formatWhen(t.due_at!, ctx.user.timezone)}`;
+    },
+  }),
+  tool({
+    name: 'add_note',
+    description:
+      '简单记：记下一件事或一笔花费（例如"打车 56 报销"、"护照放在书房抽屉"）。出差期间记的花费会自动打上出差标签并标为可报销。一句话里有多笔花费时分别调用。',
+    schema: z.object({
+      content: z.string().min(1).max(1000).describe('记什么，不含金额'),
+      amount: z.number().optional().describe('花费金额，没有就不填'),
+      currency: z.string().length(3).optional().describe('默认 CNY'),
+      category: z.enum(CATEGORIES).optional(),
+      day: z.string().regex(/^\d{4}-\d\d-\d\d$/).optional().describe('发生日期，默认今天（用户时区）'),
+      reimbursable: z.boolean().optional().describe('是否需要报销'),
+      tags: z.array(z.string().max(30)).max(5).optional(),
+    }),
+    run: async (i, ctx) => {
+      const n = await addNote(ctx.user, { ...i, currency: i.currency?.toUpperCase(), source: ctx.mode === 'mcp' ? 'mcp' : 'ai' });
+      return { id: n.id, day: n.day, content: n.content, amount: n.amount, currency: n.currency, category: n.category, tags: n.tags, reimbursable: !!n.reimbursable };
+    },
+  }),
+  tool({
+    name: 'list_notes',
+    description: '查看简单记里的记录，可按月份、关键词、标签（例如某次出差）筛选，并返回按币种 / 分类汇总的金额',
+    schema: z.object({
+      month: z.string().regex(/^\d{4}-\d\d$/).optional().describe('YYYY-MM'),
+      from: z.string().regex(/^\d{4}-\d\d-\d\d$/).optional(),
+      to: z.string().regex(/^\d{4}-\d\d-\d\d$/).optional(),
+      q: z.string().max(100).optional(),
+      tag: z.string().max(30).optional(),
+      reimbursable: z.boolean().optional(),
+    }),
+    run: async (i, ctx) => {
+      const notes = await listNotes(ctx.user.id, { ...i, limit: 300 });
+      return {
+        summary: summarize(notes),
+        notes: notes.slice(0, 100).map((n) => ({ id: n.id, day: n.day, content: n.content, amount: n.amount, currency: n.currency, category: n.category, tags: n.tags, reimbursable: !!n.reimbursable, reimbursed: !!n.reimbursed })),
+      };
+    },
+  }),
+  tool({
+    name: 'set_trip',
+    description: '开始或结束一次出差。开始后用户记的花费会自动归到这次出差、标为可报销，方便回来后汇总报销。',
+    schema: z.object({
+      action: z.enum(['start', 'end']),
+      name: z.string().max(30).optional().describe('开始时：出差名称，例如"上海出差 11/05"'),
+      start: z.string().regex(/^\d{4}-\d\d-\d\d$/).optional().describe('开始日期，默认今天'),
+    }),
+    run: async (i, ctx) => {
+      if (i.action === 'end') {
+        const t = activeTrip(ctx.user);
+        await setTrip(ctx.user, null);
+        return t ? `「${t.name}」已结束，可以用 list_notes 按标签"${t.name}"汇总` : '当前没有进行中的出差';
+      }
+      const start = i.start || DateTime.now().setZone(ctx.user.timezone).toISODate()!;
+      const name = i.name || `出差 ${start.slice(5).replace('-', '/')}`;
+      await setTrip(ctx.user, { name, start });
+      return `已开始「${name}」`;
     },
   }),
   tool({

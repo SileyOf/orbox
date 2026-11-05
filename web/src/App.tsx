@@ -1,10 +1,11 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { CalendarCheck, Mail as MailIcon, Monitor, Moon, Settings as SettingsIcon, Sparkles, Sun } from 'lucide-react';
+import { CalendarCheck, Mail as MailIcon, Palette, Settings as SettingsIcon, Sparkles } from 'lucide-react';
 import { createContext, useContext, useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { ApiError, api } from './api';
 import type { Account, SiteInfo, Task, User } from './api';
 import { applyAppearance, copyText, dismissToast, toast, useToasts } from './lib';
+import { AppearanceDialog } from './components/AppearanceDialog';
 import { Assistant } from './components/Assistant';
 import { Admin } from './pages/Admin';
 import { Login } from './pages/Login';
@@ -84,6 +85,8 @@ function useServerEvents() {
         qc.invalidateQueries({ queryKey: ['accounts'] });
       } else if (ev.type === 'tasks') {
         qc.invalidateQueries({ queryKey: ['tasks'] });
+      } else if (ev.type === 'notes') {
+        qc.invalidateQueries({ queryKey: ['notes'] });
       } else if (ev.type === 'reminder') {
         toast(`⏰ ${ev.title}`, { ms: 12_000, action: { label: '查看', run: () => navigate('/planner') } });
         desktop('计划提醒', ev.title);
@@ -107,7 +110,6 @@ function useServerEvents() {
 
 function Shell({ user }: { user: User }) {
   useServerEvents();
-  const save = useSaveSettings();
   const { data: accounts } = useAccounts();
   const { data: tasks } = useTasks();
   const unread = (accounts || []).flatMap((a) => a.folders).filter((f) => f.role === 'inbox').reduce((n, f) => n + f.unread, 0);
@@ -116,9 +118,7 @@ function Shell({ user }: { user: User }) {
   const [assistant, setAssistant] = useState(false);
   const site = useSite();
   const location = useLocation();
-  const { theme } = user.settings;
-  const nextTheme = theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system';
-  const ThemeIcon = theme === 'system' ? Monitor : theme === 'light' ? Sun : Moon;
+  const [look, setLook] = useState(false);
   const link = ({ isActive }: { isActive: boolean }) => `rail-btn${isActive ? ' active' : ''}`;
 
   return (
@@ -137,12 +137,8 @@ function Shell({ user }: { user: User }) {
           <Sparkles size={20} />
         </button>
         <div className="rail-spacer" />
-        <button
-          className="rail-btn"
-          title={`主题：${{ system: '跟随系统', light: '浅色', dark: '深色' }[theme]}`}
-          onClick={() => save({ settings: { theme: nextTheme } })}
-        >
-          <ThemeIcon size={19} />
+        <button className={`rail-btn${look ? ' active' : ''}`} title="外观设置" aria-label="外观设置" onClick={() => setLook(true)}>
+          <Palette size={19} />
         </button>
         <NavLink to="/settings/mailboxes" className={() => link({ isActive: location.pathname.startsWith('/settings') || (!!user.adminPath && location.pathname.startsWith(`/${user.adminPath}`)) })} title="设置">
           <SettingsIcon size={20} />
@@ -158,6 +154,7 @@ function Shell({ user }: { user: User }) {
         </Routes>
       </main>
       {assistant && <Assistant onClose={() => setAssistant(false)} />}
+      {look && <AppearanceDialog onClose={() => setLook(false)} />}
     </div>
   );
 }
@@ -169,15 +166,16 @@ export function App() {
     staleTime: Infinity,
   });
   const user = me.data;
+  const siteAccent = useSite()?.accent;
 
   useEffect(() => {
     if (!user) return;
-    applyAppearance(user.settings);
+    applyAppearance(user.settings, siteAccent);
     const mq = matchMedia('(prefers-color-scheme: dark)');
-    const onChange = () => applyAppearance(user.settings);
+    const onChange = () => applyAppearance(user.settings, siteAccent);
     mq.addEventListener('change', onChange);
     return () => mq.removeEventListener('change', onChange);
-  }, [user]);
+  }, [user, siteAccent]);
 
   if (me.isLoading) return <div className="empty" style={{ height: '100dvh' }}>正在加载…</div>;
   return (

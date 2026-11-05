@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { requireUser } from '../auth.js';
+import { requirePerm, requireUser } from '../auth.js';
+import type { User } from '../auth.js';
+import { assertPublicUrl } from '../net.js';
 import { askAssistant, resetSession } from '../ai/agent.js';
 import { draftReply, extractTodos, summarize, translate } from '../ai/features.js';
 import { AiError, complete, listModels } from '../ai/provider.js';
@@ -21,6 +23,7 @@ export async function aiRoutes(app: FastifyInstance) {
   app.setErrorHandler((err: any, _req, reply) => {
     if (err instanceof AiError) return reply.code(400).send({ error: err.message });
     if (err?.issues) return reply.code(400).send({ error: err.issues[0]?.message || '参数不正确' });
+    if (err.statusCode && err.statusCode < 500) return reply.code(err.statusCode).send({ error: err.message });
     console.error('[ai]', err);
     return reply.code(500).send({ error: err.message || '服务器内部错误' });
   });
@@ -39,9 +42,16 @@ export async function aiRoutes(app: FastifyInstance) {
     };
   });
 
-  app.post('/api/ai/providers', async (req) => ({ id: await saveProvider(req.user.id, null, providerInput.parse(req.body)) }));
+  const ownProvider = async (user: User, body: unknown) => {
+    requirePerm(user, 'ownAi', '自己添加模型服务的权限');
+    const input = providerInput.parse(body);
+    await assertPublicUrl(user, input.baseUrl, '接口地址');
+    return input;
+  };
 
-  app.put<IdParams>('/api/ai/providers/:id', async (req) => ({ id: await saveProvider(req.user.id, Number(req.params.id), providerInput.parse(req.body)) }));
+  app.post('/api/ai/providers', async (req) => ({ id: await saveProvider(req.user.id, null, await ownProvider(req.user, req.body)) }));
+
+  app.put<IdParams>('/api/ai/providers/:id', async (req) => ({ id: await saveProvider(req.user.id, Number(req.params.id), await ownProvider(req.user, req.body)) }));
 
   app.delete<IdParams>('/api/ai/providers/:id', async (req) => {
     await exec('DELETE FROM ai_providers WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
@@ -55,8 +65,13 @@ export async function aiRoutes(app: FastifyInstance) {
     if (body.id && !body.apiKey) {
       const p = (await providersOf(req.user)).find((x) => x.id === body.id);
       if (!p) throw new AiError('模型服务不存在');
-      target = { ...providerTarget(p, req.user.id, body.defaultModel), kind: body.kind, baseUrl: body.baseUrl };
+      // 共享服务的 Key 不能被普通用户拿去请求自己指定的地址（否则 Key 会被发到别处）
+      const locked = p.user_id === null && !req.user.isAdmin;
+      target = locked ? providerTarget(p, req.user.id, body.defaultModel) : { ...providerTarget(p, req.user.id, body.defaultModel), kind: body.kind, baseUrl: body.baseUrl };
+      if (!locked) await assertPublicUrl(req.user, body.baseUrl || '', '接口地址');
     } else {
+      requirePerm(req.user, 'ownAi', '自己添加模型服务的权限');
+      await assertPublicUrl(req.user, body.baseUrl || '', '接口地址');
       target = { kind: body.kind, baseUrl: body.baseUrl, apiKey: body.apiKey || 'none', model: body.defaultModel, userId: req.user.id, task: 'test' };
     }
     const started = Date.now();
@@ -136,6 +151,7 @@ export async function aiRoutes(app: FastifyInstance) {
   );
 
   app.post('/api/tokens', async (req) => {
+    requirePerm(req.user, 'mcp', ' MCP 外部连接');
     const body = z.object({ name: z.string().trim().min(1, '请填写名称').max(100), allowSend: z.boolean().default(false) }).parse(req.body);
     const token = `orbox_${randomToken(24)}`;
     await exec('INSERT INTO api_tokens (user_id, name, token_hash, allow_send) VALUES (?, ?, ?, ?)', [

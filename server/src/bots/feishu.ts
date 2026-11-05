@@ -62,6 +62,45 @@ function ioFor(chatId: string): BotIO {
   };
 }
 
+/**
+ * SDK 连接时要先用 /open-apis/bot/v3/info 拿机器人身份，失败时只给一句笼统的报错，真正原因藏在 cause 里。
+ * 这里自己按同样的步骤查一遍，把飞书返回的错误码翻译成能照着做的提示。
+ */
+async function diagnose(appId: string, appSecret: string, lark: boolean): Promise<string | null> {
+  const base = lark ? 'https://open.larksuite.com' : 'https://open.feishu.cn';
+  const console_ = lark ? 'Lark 开发者后台' : '飞书开放平台';
+  const call = async (url: string, init: RequestInit) => {
+    const r = await fetch(base + url, { ...init, signal: AbortSignal.timeout(15_000) });
+    return (await r.json().catch(() => ({ code: r.status, msg: r.statusText }))) as { code: number; msg: string; [k: string]: any };
+  };
+  let tok;
+  try {
+    tok = await call('/open-apis/auth/v3/tenant_access_token/internal', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+    });
+  } catch (e) {
+    return `连不上 ${base}（${(e as Error).message}），请检查服务器网络`;
+  }
+  if (tok.code !== 0) {
+    if (tok.code === 10003 || tok.code === 10014 || /app_id|secret/i.test(tok.msg))
+      return `App ID 或 App Secret 不对（飞书返回 ${tok.code}：${tok.msg}）。请到${console_} → 凭证与基础信息 重新复制`;
+    return `获取访问凭证失败（飞书返回 ${tok.code}：${tok.msg}）`;
+  }
+  const info = await call('/open-apis/bot/v3/info', { headers: { authorization: `Bearer ${tok.tenant_access_token}` } }).catch(
+    (e) => ({ code: -1, msg: (e as Error).message }) as { code: number; msg: string; bot?: any },
+  );
+  if (info.code === 0 && info.bot?.open_id) {
+    const st = info.bot.activate_status;
+    if (st !== undefined && st !== 2) return `机器人还没启用（状态 ${st}）。请在${console_} → 版本管理与发布 里创建版本并发布，企业管理员审核通过后才能使用`;
+    return null;
+  }
+  const hint = `请到${console_}打开这个应用：① 添加应用能力 → 机器人；② 版本管理与发布 → 创建版本并申请发布（自建应用通常由企业管理员审核，审核通过后才生效）。完成后这里会自动重连`;
+  if (info.code === 0) return `应用还没有开启机器人能力，或开启后还没有发布版本。${hint}`;
+  return `读取机器人信息失败（飞书返回 ${info.code}：${info.msg}）。${hint}`;
+}
+
 export const feishu: Adapter = {
   platform: 'feishu',
   get label() {
@@ -92,7 +131,14 @@ export const feishu: Adapter = {
       if (action) await inboundAction('feishu', evt.chatId, action, ioFor(evt.chatId));
     });
     ch.on('error', (err) => console.error('[feishu]', err.code, err.message));
-    await ch.connect();
+    try {
+      await ch.connect();
+    } catch (e) {
+      await ch.disconnect().catch(() => {});
+      const why = await diagnose(cfg.appId, cfg.appSecret, cfg.domain === 'lark').catch(() => null);
+      const cause = (e as { cause?: Error }).cause?.message;
+      throw new Error(why || `${(e as Error).message}${cause ? `（${cause}）` : ''}`);
+    }
     channel = ch;
     botName = ch.botIdentity?.name || siteConfig().name;
     console.log(`[feishu] ${botName} 已连接`);

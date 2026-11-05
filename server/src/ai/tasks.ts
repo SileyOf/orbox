@@ -44,7 +44,7 @@ export interface ProviderRow {
 
 /** 用户能用的服务：自己的 + 管理员开放的共享服务 */
 export async function providersOf(user: User): Promise<ProviderRow[]> {
-  const shared = siteConfig().shareAi || user.isAdmin;
+  const shared = user.isAdmin || (siteConfig().shareAi && user.perms.sharedAi);
   return query<ProviderRow>(
     `SELECT * FROM ai_providers WHERE user_id = ? ${shared ? 'OR user_id IS NULL' : ''} ORDER BY user_id IS NULL, id`,
     [user.id],

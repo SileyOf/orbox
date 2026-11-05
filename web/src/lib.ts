@@ -1,7 +1,20 @@
 import { useSyncExternalStore } from 'react';
 import type { UserSettings } from './api';
 
-export const ACCENTS = ['#cceb79', '#ff8a65', '#f2c14e', '#7fd1ae', '#7db7f0', '#b39df2', '#f29ac0', '#283026'];
+/** 预设强调色（与 Orimg 一致） */
+export const ACCENT_PRESETS = [
+  { name: '青柠', hex: '#cceb79' },
+  { name: '蓝色', hex: '#3985ee' },
+  { name: '紫色', hex: '#a16ad3' },
+  { name: '粉色', hex: '#e776a3' },
+  { name: '红色', hex: '#e55c60' },
+  { name: '橙色', hex: '#ee9140' },
+  { name: '黄色', hex: '#e9bf36' },
+  { name: '绿色', hex: '#66ac73' },
+  { name: '石墨', hex: '#949a96' },
+];
+export const ACCENTS = ACCENT_PRESETS.map((a) => a.hex);
+export const accentName = (hex: string) => ACCENT_PRESETS.find((a) => a.hex === hex.toLowerCase())?.name ?? hex.toUpperCase();
 
 /** 强调色上的文字颜色：按相对亮度在深浅之间选一个 */
 export function onAccent(hex: string): string {
@@ -12,15 +25,27 @@ export function onAccent(hex: string): string {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.4 ? '#1d2219' : '#ffffff';
 }
 
-export function applyAppearance(s: Pick<UserSettings, 'theme' | 'accent'>) {
+export type Appearance = Pick<UserSettings, 'theme' | 'accent'> & Partial<Pick<UserSettings, 'surface' | 'selection' | 'followSite' | 'motion'>>;
+
+/** 套用外观。siteAccent 用于"强调色跟随站点" */
+export function applyAppearance(s: Appearance, siteAccent?: string) {
   const root = document.documentElement;
   const dark = s.theme === 'dark' || (s.theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+  const accent = s.followSite && siteAccent ? siteAccent : s.accent;
+  const selection = !s.selection || s.selection === 'accent' ? accent : s.selection;
   root.dataset.theme = dark ? 'dark' : 'light';
-  root.style.setProperty('--accent', s.accent);
-  root.style.setProperty('--on-accent', onAccent(s.accent));
+  root.dataset.surface = s.surface || 'solid';
+  root.dataset.motion = s.motion === false ? 'off' : 'on';
+  root.style.setProperty('--accent', accent);
+  root.style.setProperty('--on-accent', onAccent(accent));
+  root.style.setProperty('--selection', selection);
+  root.style.setProperty('--on-selection', onAccent(selection));
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#171a18' : '#fafbf8');
   try {
     localStorage.setItem('orbox.theme', s.theme);
-    localStorage.setItem('orbox.accent', s.accent);
+    localStorage.setItem('orbox.accent', accent);
+    localStorage.setItem('orbox.surface', s.surface || 'solid');
+    localStorage.setItem('orbox.motion', s.motion === false ? 'off' : 'on');
   } catch {}
 }
 
@@ -123,3 +148,41 @@ export function useMedia(queryText: string): boolean {
     () => matchMedia(queryText).matches,
   );
 }
+
+// ---------------- 农历（与服务端同一套 Intl 中国农历） ----------------
+
+const LUNAR_MONTHS = ['正', '二', '三', '四', '五', '六', '七', '八', '九', '十', '冬', '腊'];
+const lunarDayName = (d: number) =>
+  d <= 10 ? `初${'一二三四五六七八九十'[d - 1]}` : d < 20 ? `十${'一二三四五六七八九'[d - 11]}` : d === 20 ? '二十' : d < 30 ? `廿${'一二三四五六七八九'[d - 21]}` : '三十';
+export const lunarLabel = (l: { month: number; day: number; leap?: boolean }) => `${l.leap ? '闰' : ''}${LUNAR_MONTHS[l.month - 1]}月${lunarDayName(l.day)}`;
+export const LUNAR_MONTH_NAMES = LUNAR_MONTHS.map((m) => `${m}月`);
+export const LUNAR_DAY_NAMES = Array.from({ length: 30 }, (_, i) => lunarDayName(i + 1));
+
+let lunarFmt: Intl.DateTimeFormat | null = null;
+/** 某个日期对应的农历月日 */
+export function toLunar(d: Date): { month: number; day: number; leap: boolean } | null {
+  try {
+    lunarFmt ??= new Intl.DateTimeFormat('en-u-ca-chinese', { month: 'numeric', day: 'numeric' });
+    const parts = lunarFmt.formatToParts(d);
+    const m = parts.find((p) => p.type === 'month')!.value;
+    return { month: parseInt(m, 10), day: Number(parts.find((p) => p.type === 'day')!.value), leap: /bis/.test(m) };
+  } catch {
+    return null;
+  }
+}
+
+/** 金额显示：人民币 ¥，其他币种带代码 */
+export const money = (amount: number | string, currency = 'CNY') => {
+  const n = Number(amount);
+  const v = n.toLocaleString('zh-CN', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
+  return currency === 'CNY' ? `¥${v}` : currency === 'USD' ? `$${v}` : `${v} ${currency}`;
+};
+
+/** 距离某天还有几天（按本地日期） */
+export const daysUntil = (iso: string) => {
+  const d = new Date(iso);
+  const a = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const now = new Date();
+  const b = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  return Math.round((a - b) / 86400_000);
+};

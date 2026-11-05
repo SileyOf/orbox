@@ -9,6 +9,7 @@ import { sendMail } from '../mail/send.js';
 import { moveMessages, setFlag } from '../routes/mail.js';
 import { formatWhen, parseQuickTask } from '../tasks/parse.js';
 import { completeTask, createTask, deleteTask, dueToday, skipTask, snoozeTask } from '../tasks/service.js';
+import { deleteNotes, quickNote } from '../notes/service.js';
 import { fullMailCard, helpText, inboxCard, linksCard, loadMail, taskCard } from './cards.js';
 import type { BotIO, Card, Platform } from './types.js';
 import { plain } from './types.js';
@@ -43,6 +44,10 @@ export async function handleAction(user: User, platform: Platform, action: strin
   const id = Number(idStr);
   try {
     if (action === 'inbox') return void (await io.reply(await inboxCard(user)));
+    if (kind === 'n' && verb === 'x') {
+      await deleteNotes(user.id, [id]);
+      return io.note('已撤销');
+    }
 
     if (kind === 'm') {
       const m = await loadMail(user.id, id);
@@ -139,6 +144,9 @@ export async function handleAction(user: User, platform: Platform, action: strin
 
 export async function handleText(user: User, platform: Platform, raw: string, io: BotIO): Promise<void> {
   const text = raw.trim();
+  // "记 打车 56 报销" / "记一笔 午饭 38" / "/note …"：直接记到简单记，不经过 AI
+  const note = text.match(/^(?:\/note(?:@\S+)?|记一笔|记账|记)[\s:：]+([\s\S]+)$/i);
+  if (note) return quickNoteReply(user, platform, note[1], io);
   const [cmd, ...rest] = text.split(/\s+/);
   const arg = rest.join(' ');
   try {
@@ -163,12 +171,25 @@ export async function handleText(user: User, platform: Platform, raw: string, io
       case '/add':
         return quickAdd(user, platform, arg, io);
     }
-    // 没配置 AI 时，普通消息当作一句话新建计划；配置了就交给助手
-    if (!(await resolveTask(user, 'assistant'))) return quickAdd(user, platform, text, io);
+    // 没配置 AI 时，普通消息当作一句话新建计划（说出差相关的就记到简单记）；配置了就交给助手
+    if (!(await resolveTask(user, 'assistant'))) {
+      if (/^(今天|昨天)?\s*(开始)?出差|出差(结束|回来)/.test(text)) return quickNoteReply(user, platform, text, io);
+      return quickAdd(user, platform, text, io);
+    }
     await aiAnswer(user, platform, text, io);
   } catch (e) {
     await io.reply({ tone: 'warn', text: `出错了：${plain((e as Error).message)}` });
   }
+}
+
+async function quickNoteReply(user: User, platform: Platform, text: string, io: BotIO) {
+  const r = await quickNote(user, text, platform);
+  if (r.tripEnded) return io.reply({ tone: 'info', text: `「${plain(r.tripEnded)}」已结束。在网页的 计划 → 简单记 里可以按这次出差汇总、导出报销表。` });
+  if (r.trip) return io.reply({ tone: 'info', text: `已开始 **${plain(r.trip)}**，之后记的花费会自动归到这次出差、标为可报销。回来后发"出差结束"。` });
+  const n = r.note!;
+  const money = n.amount !== null ? ` · ${n.currency === 'CNY' ? '¥' : `${n.currency} `}${Number(n.amount)}` : '';
+  const flags = [n.category, n.reimbursable ? '可报销' : '', ...(n.tags || [])].filter(Boolean).join(' · ');
+  await io.reply({ tone: 'info', text: `已记下：**${plain(n.content)}**${money}\n${n.day} · ${plain(flags)}`, buttons: [[{ text: '撤销', action: `n:x:${n.id}` }]] });
 }
 
 async function quickAdd(user: User, platform: Platform, text: string, io: BotIO) {

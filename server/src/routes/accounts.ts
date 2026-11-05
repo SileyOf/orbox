@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireUser } from '../auth.js';
+import type { User } from '../auth.js';
+import { assertPublicHost } from '../net.js';
 import { config } from '../config.js';
 import { decrypt, encrypt, randomToken } from '../crypto.js';
 import { exec, one, query } from '../db.js';
@@ -40,6 +42,11 @@ const COLUMNS = [
 const OAUTH_COOKIE = 'orbox_oauth_state';
 const CONN_FIELDS = ['imap_host', 'imap_port', 'imap_secure', 'smtp_host', 'smtp_port', 'smtp_secure', 'username'] as const;
 
+async function checkHosts(user: User, b: { imap_host: string; smtp_host: string }) {
+  await assertPublicHost(user, b.imap_host, 'IMAP 服务器');
+  await assertPublicHost(user, b.smtp_host, 'SMTP 服务器');
+}
+
 export async function accountRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireUser);
 
@@ -59,6 +66,10 @@ export async function accountRoutes(app: FastifyInstance) {
 
   app.post('/api/accounts', async (req, reply) => {
     const body = accountBody.parse(req.body);
+    const max = req.user.perms.maxAccounts;
+    if (max && (await one<{ n: number }>('SELECT COUNT(*) AS n FROM accounts WHERE user_id = ?', [req.user.id]))!.n >= max)
+      return reply.code(403).send({ error: `最多只能添加 ${max} 个邮箱，需要更多请联系管理员` });
+    await checkHosts(req.user, body);
     try {
       await testConnection(body);
     } catch (e: any) {
@@ -101,6 +112,7 @@ export async function accountRoutes(app: FastifyInstance) {
     const norm = (v: unknown) => (typeof v === 'boolean' ? +v : v);
     const connChanged = !!body.password || CONN_FIELDS.some((f) => f in body && norm(body[f]) !== current[f]);
     if (connChanged) {
+      await checkHosts(req.user, next);
       try {
         await testConnection(next);
       } catch (e: any) {

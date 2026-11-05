@@ -63,6 +63,7 @@ function Profile({ onLogout }: { onLogout: () => void }) {
           <input className="input" type="password" placeholder="新密码（至少 8 位）" autoComplete="new-password" minLength={8} value={pw.next} onChange={(e) => setPw({ ...pw, next: e.target.value })} required />
           <button className="btn sm">保存</button>
         </form>
+        <Sessions />
         <Setting title="退出登录">
           <button className="btn sm danger" onClick={onLogout}>退出</button>
         </Setting>
@@ -71,3 +72,36 @@ function Profile({ onLogout }: { onLogout: () => void }) {
   );
 }
 
+
+const device = (ua: string) => {
+  const os = /iPhone|iPad/.test(ua) ? 'iOS' : /Android/.test(ua) ? 'Android' : /Mac OS X/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : '';
+  const br = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : '';
+  return [br, os].filter(Boolean).join(' · ') || '未知设备';
+};
+
+function Sessions() {
+  const q = useQuery({ queryKey: ['sessions'], queryFn: () => api<{ userAgent: string; createdAt: string; current: boolean }[]>('/me/sessions') });
+  const others = (q.data || []).filter((s) => !s.current);
+  return (
+    <Setting
+      title="登录的设备"
+      hint={
+        q.data
+          ? q.data.map((s) => `${device(s.userAgent)}${s.current ? '（当前）' : ''} · ${new Date(s.createdAt).toLocaleDateString()}`).join('；')
+          : '加载中…'
+      }
+    >
+      <button
+        className="btn sm"
+        disabled={!others.length}
+        onClick={() =>
+          api<{ count: number }>('/me/logout-others', { method: 'POST' })
+            .then((r) => (toast(`已退出 ${r.count} 个设备`), q.refetch()))
+            .catch(toastError)
+        }
+      >
+        退出其他设备
+      </button>
+    </Setting>
+  );
+}

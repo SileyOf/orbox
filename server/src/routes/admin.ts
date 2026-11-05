@@ -10,9 +10,10 @@ import { botStatus, restartBot } from '../bots/hub.js';
 import { APP_VERSION, config } from '../config.js';
 import { hashPassword } from '../crypto.js';
 import { exec, one, query } from '../db.js';
+import { logFile, recentLogs } from '../log.js';
 import { stopAccount } from '../mail/manager.js';
 import { microsoftRedirectUri } from '../mail/oauth.js';
-import { integration, maskedIntegrations, publicSite, saveIntegration, saveSite, siteConfig, siteSchema } from '../site.js';
+import { integration, maskedIntegrations, permsSchema, publicSite, saveIntegration, saveSite, siteConfig, siteSchema } from '../site.js';
 import type { Integrations } from '../site.js';
 
 const started = Date.now();
@@ -86,6 +87,13 @@ export async function adminRoutes(app: FastifyInstance) {
     }
   });
 
+  // ---- 运行日志 ----
+
+  app.get<{ Querystring: { level?: string; q?: string; limit?: string } }>('/api/admin/logs', async (req) => ({
+    lines: recentLogs({ level: req.query.level, q: req.query.q, limit: Math.min(Number(req.query.limit) || 500, 3000) }),
+    file: logFile(),
+  }));
+
   // ---- 集成：聊天平台与 OAuth 凭据 ----
 
   app.get('/api/admin/integrations', async () => ({
@@ -158,25 +166,52 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ---- 用户 ----
 
-  app.get('/api/admin/users', () =>
-    query(
-      `SELECT u.id, u.email, u.name, u.is_admin, u.disabled, u.created_at, u.last_login_at,
-              (SELECT COUNT(*) FROM accounts a WHERE a.user_id = u.id) AS accounts
+  app.get('/api/admin/users', async () => {
+    const rows = await query<any>(
+      `SELECT u.id, u.email, u.name, u.is_admin, u.disabled, u.perms, u.created_at, u.last_login_at,
+              GREATEST(COALESCE(u.last_seen_at, u.last_login_at), COALESCE(u.last_login_at, u.last_seen_at)) AS last_seen_at,
+              (SELECT COUNT(*) FROM accounts a WHERE a.user_id = u.id) AS accounts,
+              (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id AND s.expires_at > UTC_TIMESTAMP()) AS sessions,
+              (SELECT COUNT(*) FROM bot_links b WHERE b.user_id = u.id) AS bots,
+              (SELECT COUNT(*) FROM api_tokens t WHERE t.user_id = u.id) AS tokens
        FROM users u ORDER BY u.id`,
-    ),
-  );
+    );
+    // perms 为空表示跟随站点默认；effective 给前端直接显示
+    return rows.map((r) => ({ ...r, custom: !!r.perms, perms: { ...siteConfig().defaultPerms, ...(r.perms || {}) } }));
+  });
 
   app.patch<{ Params: { id: string } }>('/api/admin/users/:id', async (req, reply) => {
     const id = Number(req.params.id);
-    const body = z.object({ isAdmin: z.boolean(), disabled: z.boolean(), name: z.string().trim().min(1).max(100) }).partial().parse(req.body);
+    const body = z
+      .object({
+        isAdmin: z.boolean(),
+        disabled: z.boolean(),
+        name: z.string().trim().min(1).max(100),
+        email: z.string().trim().toLowerCase().email('邮箱格式不正确'),
+        /** null 表示恢复为站点默认权限 */
+        perms: permsSchema.nullable(),
+      })
+      .partial()
+      .parse(req.body);
     if (id === req.user.id && (body.isAdmin === false || body.disabled)) return reply.code(400).send({ error: '不能取消自己的管理员身份或停用自己' });
+    if (!(await one('SELECT id FROM users WHERE id = ?', [id]))) return reply.code(404).send({ error: '用户不存在' });
+    if (body.email && (await one('SELECT id FROM users WHERE email = ? AND id <> ?', [body.email, id]))) return reply.code(400).send({ error: '这个邮箱已被其他用户使用' });
     if (body.isAdmin !== undefined) await exec('UPDATE users SET is_admin = ? WHERE id = ?', [+body.isAdmin, id]);
     if (body.disabled !== undefined) {
       await exec('UPDATE users SET disabled = ? WHERE id = ?', [+body.disabled, id]);
       if (body.disabled) await exec('DELETE FROM sessions WHERE user_id = ?', [id]);
     }
     if (body.name) await exec('UPDATE users SET name = ? WHERE id = ?', [body.name, id]);
+    if (body.email) await exec('UPDATE users SET email = ? WHERE id = ?', [body.email, id]);
+    if (body.perms !== undefined) await exec('UPDATE users SET perms = ? WHERE id = ?', [body.perms ? JSON.stringify(body.perms) : null, id]);
     return { ok: true };
+  });
+
+  /** 让这个用户所有已登录的设备下线 */
+  app.post<{ Params: { id: string } }>('/api/admin/users/:id/logout', async (req, reply) => {
+    if (Number(req.params.id) === req.user.id) return reply.code(400).send({ error: '要退出自己的其他设备，请在 设置 → 账户 里点"退出其他设备"' });
+    const res = await exec('DELETE FROM sessions WHERE user_id = ?', [req.params.id]);
+    return { ok: true, count: res.affectedRows };
   });
 
   /** 生成一个临时密码交给用户，同时让他所有已登录的设备下线 */
