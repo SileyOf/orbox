@@ -5,11 +5,11 @@ function required(name: string): string {
 }
 
 export const APP_NAME = 'Orbox';
-export const APP_VERSION = '0.5.0';
+export const APP_VERSION = '0.5.1';
 
 export const config = {
   port: Number(process.env.PORT || 8787),
-  publicUrl: (process.env.PUBLIC_URL || 'http://localhost:8787').replace(/\/$/, ''),
+  publicUrl: normalizePublicUrl(process.env.PUBLIC_URL),
   db: {
     host: required('DB_HOST'),
     port: Number(process.env.DB_PORT || 3306),
@@ -43,3 +43,21 @@ export const config = {
     clientSecret: process.env.MS_CLIENT_SECRET || '',
   },
 };
+
+/**
+ * PUBLIC_URL 只写了域名（例如 orbox.example.com）时自动补上协议：本机地址补 http://，其余补 https://。
+ * 同时去掉末尾的斜杠和路径，避免拼链接时出错。
+ */
+function normalizePublicUrl(raw?: string): string {
+  let v = (raw || '').trim() || 'http://localhost:8787';
+  if (!/^https?:\/\//i.test(v)) {
+    const local = /^(localhost|127\.|\[?::1\]?|0\.0\.0\.0)/i.test(v);
+    v = `${local ? 'http' : 'https'}://${v}`;
+    console.warn(`[config] PUBLIC_URL 缺少 http:// 或 https://，已按 ${v} 处理，建议在 .env 里写完整`);
+  }
+  try {
+    return new URL(v).origin;
+  } catch {
+    throw new Error(`PUBLIC_URL 格式不对：${raw}，应写成 https://你的域名`);
+  }
+}

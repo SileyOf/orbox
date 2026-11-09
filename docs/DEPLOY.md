@@ -209,6 +209,7 @@ sh orbox-upgrade-0.1.0-to-0.1.1/upgrade.sh /opt/orbox
 | 现象 | 原因和处理 |
 |---|---|
 | 启动即退出，提示"缺少环境变量" | `.env` 里对应项没填 |
+| 启动报 `Invalid URL` / `PUBLIC_URL 格式不对` | `PUBLIC_URL` 要写完整地址，例如 `https://orbox.example.com`（0.5.1 起只写域名也会自动补 `https://`） |
 | `[db] 无法连接…ETIMEDOUT` | 容器到数据库的网络不通，见下方"数据库连不上" |
 | `[db] 无法连接…ECONNREFUSED` | 地址或端口不对。`DB_HOST` 写成了 `127.0.0.1` / `localhost` 时指向的是容器自己 |
 | `[db] 无法连接…ER_ACCESS_DENIED` | 账号密码不对，或该用户不允许从 Orbox 的来源地址登录 |
