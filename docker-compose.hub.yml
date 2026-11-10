@@ -1,0 +1,22 @@
+# 直接使用 Docker Hub 上的镜像部署，不需要源码。
+# 用法：把本文件和 .env（参考 .env.example）放在同一目录，执行
+#   docker compose -f docker-compose.hub.yml up -d
+# 升级：docker compose -f docker-compose.hub.yml pull && docker compose -f docker-compose.hub.yml up -d
+# 想固定版本，把 latest 换成具体版本号，例如 0.5.1。
+services:
+  orbox:
+    image: yuki955/orbox:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LOG_DIR: /app/logs
+    volumes:
+      - orbox-logs:/app/logs
+    ports:
+      - "127.0.0.1:8787:8787"
+    # 数据库和 Orbox 在同一台机器时，DB_HOST 填 host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  orbox-logs:

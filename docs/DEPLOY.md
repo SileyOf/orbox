@@ -1,5 +1,7 @@
 # Orbox 部署文档
 
+> Orbox 以 PolyForm Noncommercial 1.0.0 许可发布，可免费用于个人和非营利用途，商业使用需另行获得授权，见仓库根目录的 LICENSE。
+
 适用场景：一台 Linux 服务器跑 Orbox，MySQL 和 mailcow 各自独立部署。
 
 ## 1. 准备
@@ -54,6 +56,10 @@ openssl rand -hex 32   # 生成 APP_SECRET
 | `AI_PROVIDER` `AI_BASE_URL` `AI_API_KEY` `AI_MODEL` `AI_FAST_MODEL` `AI_SHARED` | | 服务器默认 AI 模型，见第 12 节 |
 
 ## 4. 启动
+
+> **不想下载源码**：可以直接用 Docker Hub 镜像 `yuki955/orbox`。只需要 `docker-compose.hub.yml` 和 `.env` 两个文件，
+> 用 `docker compose -f docker-compose.hub.yml up -d` 启动，升级时 `pull` 后再 `up -d`（数据库迁移同样在启动时自动执行）。
+> 下面以源码部署为例，其余步骤两种方式相同。
 
 ```bash
 docker compose up -d --build
