@@ -1,5 +1,6 @@
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { isPrivateIp } from '../net.js';
 import { siteConfig } from '../site.js';
 import type { EventKind, User } from '../auth.js';
 
@@ -15,15 +16,13 @@ export interface Push {
 
 export type ChannelName = 'bark' | 'ntfy' | 'webhook';
 
-const PRIVATE = [/^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./, /^169\.254\./, /^0\./, /^::1$/, /^f[cd]/i, /^fe80:/i];
-
 /** 这些地址由用户填写、由服务器去请求，必须挡住指向内网的地址 */
 async function publicUrl(raw: string): Promise<URL> {
   const url = new URL(raw);
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('只支持 http/https 地址');
   const host = url.hostname.replace(/^\[|\]$/g, '');
   const addresses = isIP(host) ? [host] : (await lookup(host, { all: true })).map((a) => a.address);
-  if (host === 'localhost' || addresses.some((a) => PRIVATE.some((re) => re.test(a)))) {
+  if (host === 'localhost' || addresses.some(isPrivateIp)) {
     throw new Error('不允许使用内网地址');
   }
   return url;

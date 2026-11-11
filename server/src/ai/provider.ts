@@ -123,6 +123,7 @@ async function openai(t: Target, body: { messages: OpenAIMessage[]; tools?: unkn
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t.apiKey}` },
         body: JSON.stringify(payload),
+        redirect: 'error',
         signal: AbortSignal.timeout(120_000),
       });
     } catch (e) {
@@ -209,7 +210,7 @@ export async function listModels(t: Pick<Target, 'kind' | 'baseUrl' | 'apiKey'>)
       throw claudeError(e);
     }
   }
-  const res = await fetch(`${base(t)}/models`, { headers: { Authorization: `Bearer ${t.apiKey}` }, signal: AbortSignal.timeout(20_000) }).catch((e) => {
+  const res = await fetch(`${base(t)}/models`, { headers: { Authorization: `Bearer ${t.apiKey}` }, redirect: 'error', signal: AbortSignal.timeout(20_000) }).catch((e) => {
     throw new AiError(`无法连接模型服务：${e.message}`);
   });
   const data: any = await res.json().catch(() => ({}));

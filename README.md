@@ -3,7 +3,7 @@
 自托管的**邮件 + 计划**客户端：多邮箱 Webmail、验证码秒推、带提醒的计划表、聊天机器人和 AI 助手。
 兼容 mailcow，也能接入任何标准 IMAP / SMTP 邮箱，Outlook / Microsoft 365 支持 OAuth 登录。
 
-> 当前版本 **0.5.1**，还没到 1.0：功能在快速迭代，可能有不兼容的改动。欢迎在 Issues 里反馈问题和建议。
+> 当前版本 **0.6.0**，还没到 1.0：功能在快速迭代，可能有不兼容的改动。欢迎在 Issues 里反馈问题和建议。
 > 更新记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 功能
@@ -44,10 +44,14 @@
 ```bash
 mkdir orbox && cd orbox
 curl -fsSLO https://raw.githubusercontent.com/SileyOf/orbox/main/docker-compose.hub.yml
-curl -fsSL https://raw.githubusercontent.com/SileyOf/orbox/main/.env.example -o .env
-# 编辑 .env：至少填数据库连接、APP_SECRET（openssl rand -hex 32）、PUBLIC_URL
 docker compose -f docker-compose.hub.yml up -d
+docker compose -f docker-compose.hub.yml logs | grep 安装码
 ```
+
+然后打开网页，跟着**安装向导**走：输入日志里的安装码 → 填数据库（库不存在会自动创建）→ 站点名称和访问地址 → 创建管理员账号，装完直接进入。
+不需要事先写任何配置文件；密钥会自动生成，和数据库连接一起保存在 `orbox-data` 数据卷里（备份时请带上它）。
+
+> 需要 Docker Compose 2.24 或更高版本。更喜欢用配置文件的话，也可以把 [.env.example](.env.example) 存成同目录的 `.env` 填好，`.env` 里的配置优先于向导保存的。
 
 镜像：[`yuki955/orbox`](https://hub.docker.com/r/yuki955/orbox)，支持 `linux/amd64` 和 `linux/arm64`。
 
@@ -55,11 +59,11 @@ docker compose -f docker-compose.hub.yml up -d
 
 ```bash
 git clone https://github.com/SileyOf/orbox.git && cd orbox
-cp .env.example .env   # 同上，填好配置
+cp .env.example .env   # 可以填好配置；也可以什么都不改，启动后在网页的安装向导里填
 docker compose up -d --build
 ```
 
-服务监听 `127.0.0.1:8787`，请用 Nginx / Caddy 反代并配置 HTTPS。打开网页后**第一个注册的用户自动成为管理员**。
+服务监听 `127.0.0.1:8787`，请用 Nginx / Caddy 反代并配置 HTTPS，再用域名打开网页完成安装。
 
 建库、反代、Outlook 应用注册、各聊天平台配置、备份、升级、排查等完整步骤见 [docs/DEPLOY.md](docs/DEPLOY.md)。
 
@@ -84,7 +88,7 @@ web/      React + Vite 单页应用
 ```
 
 IMAP 服务器始终是邮件的唯一来源，MySQL 里只是信封、标志和正文缓存，丢了可以重新同步。
-需要备份的是数据库（邮件缓存表可以不备份）和 `.env` 里的 `APP_SECRET`（邮箱密码等用它加密）。
+需要备份的是数据库（邮件缓存表可以不备份）和 `APP_SECRET`（邮箱密码等用它加密）：用安装向导装的在 `orbox-data` 数据卷的 `config.json` 里，用 `.env` 配置的在 `.env` 里。
 
 ## 路线
 
@@ -94,6 +98,7 @@ IMAP 服务器始终是邮件的唯一来源，MySQL 里只是信封、标志和
 - [x] AI 多模型按任务分配、本地规则兜底、助手、MCP
 - [x] 后台管理、用户权限、运行日志
 - [x] 周期计划（账单、农历生日）、简单记
+- [x] 网页安装向导
 - [ ] Gmail OAuth、两步验证
 - [ ] 1.0：稳定的数据结构和升级路径
 

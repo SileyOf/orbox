@@ -12,13 +12,18 @@ import { Login } from './pages/Login';
 import { MailPage } from './pages/Mail';
 import { Planner } from './pages/Planner';
 import { Settings } from './pages/Settings';
+import { Setup } from './pages/Setup';
 
 const UserContext = createContext<User>(null!);
 export const useUser = () => useContext(UserContext);
 
+/** 登录页和外壳都要用的站点状态；setup 为 true 表示还没有完成首次安装 */
+const useAuthStatus = () =>
+  useQuery({ queryKey: ['auth-status'], queryFn: () => api<{ site: SiteInfo; setup?: boolean }>('/auth/status'), staleTime: 5 * 60_000 });
+
 /** 站点外观（名称、Logo 等），登录前后都需要 */
 export function useSite(): SiteInfo | undefined {
-  const status = useQuery({ queryKey: ['auth-status'], queryFn: () => api<{ site: SiteInfo }>('/auth/status'), staleTime: 5 * 60_000 });
+  const status = useAuthStatus();
   const site = status.data?.site;
   useEffect(() => {
     if (!site) return;
@@ -162,11 +167,13 @@ function Shell({ user }: { user: User }) {
 export function App() {
   const me = useQuery({
     queryKey: ['me'],
-    queryFn: () => api<User>('/me').catch((e) => (e instanceof ApiError && e.status === 401 ? null : Promise.reject(e))),
+    // 503 是首次安装还没完成，由下面的安装向导接手
+    queryFn: () => api<User>('/me').catch((e) => (e instanceof ApiError && (e.status === 401 || e.status === 503) ? null : Promise.reject(e))),
     staleTime: Infinity,
   });
   const user = me.data;
   const siteAccent = useSite()?.accent;
+  const needSetup = !!useAuthStatus().data?.setup;
 
   useEffect(() => {
     if (!user) return;
@@ -177,6 +184,13 @@ export function App() {
     return () => mq.removeEventListener('change', onChange);
   }, [user, siteAccent]);
 
+  if (needSetup)
+    return (
+      <>
+        <Setup />
+        <Toasts />
+      </>
+    );
   if (me.isLoading) return <div className="empty" style={{ height: '100dvh' }}>正在加载…</div>;
   return (
     <>

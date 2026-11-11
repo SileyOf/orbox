@@ -18,6 +18,35 @@ purifier.addHook('afterSanitizeAttributes', (node) => {
 export const sanitizeMail = (html: string) =>
   purifier.sanitize(html, { WHOLE_DOCUMENT: true, FORBID_TAGS: ['form', 'input', 'button', 'textarea', 'select'] });
 
+const RISKY_STYLE = /position|z-index|url\s*\(|expression|behavior|-moz-binding/i;
+
+/**
+ * 回复、转发、继续编辑草稿时，原邮件的 HTML 会放进写信编辑器，而编辑器在主页面里、不在沙箱中。
+ * 所以这里清理得更严：去掉 <style> 和 class / id（否则邮件能套用甚至改写 Orbox 自己的样式、盖住界面），
+ * 去掉定位和外链背景；开启"拦截远程图片"时去掉远程图片（否则一点回复就会加载追踪像素）。
+ */
+export function sanitizeForEditor(html: string, blockRemote: boolean): string {
+  const clean = purifier.sanitize(html, {
+    FORBID_TAGS: ['form', 'input', 'button', 'textarea', 'select', 'style', 'link', 'meta', 'base', 'svg', 'math', 'iframe', 'object', 'embed', 'video', 'audio'],
+    FORBID_ATTR: ['class', 'id', 'background', 'srcset', 'name'],
+  });
+  const doc = new DOMParser().parseFromString(clean, 'text/html');
+  for (const el of doc.body.querySelectorAll<HTMLElement>('*')) {
+    const style = el.getAttribute('style');
+    if (style && RISKY_STYLE.test(style)) {
+      el.setAttribute('style', style.split(';').filter((d) => !RISKY_STYLE.test(d)).join(';'));
+    }
+    if (el.tagName === 'IMG') {
+      const src = el.getAttribute('src') || '';
+      if (blockRemote && /^(https?:)?\/\//i.test(src.trim())) {
+        el.removeAttribute('src');
+        if (!el.getAttribute('alt')) el.setAttribute('alt', '[图片]');
+      }
+    }
+  }
+  return doc.body.innerHTML;
+}
+
 /**
  * HTML 邮件放进不允许脚本的沙箱 iframe，并用 CSP 掐掉一切外部请求；
  * 远程图片只有用户点了"显示"才放行，避免追踪像素暴露已读状态。

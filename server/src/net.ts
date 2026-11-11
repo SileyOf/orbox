@@ -11,12 +11,38 @@ function privateV4(ip: string) {
     (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19)) || a >= 224;
 }
 
+/** 把 IPv6 地址展开成 8 组 16 位数；格式不对返回 null */
+function expandV6(ip: string): number[] | null {
+  let v = ip.toLowerCase().split('%')[0];
+  // 末尾带点分十进制的写法（::ffff:1.2.3.4）先换成两组十六进制
+  const dotted = v.match(/^(.*:)(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (dotted) {
+    const [a, b, c, d] = dotted.slice(2).map(Number);
+    if ([a, b, c, d].some((n) => n > 255)) return null;
+    v = `${dotted[1]}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const halves = v.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (fill < 0 || (halves.length === 1 && head.length !== 8)) return null;
+  const groups = [...head, ...Array(fill).fill('0'), ...tail].map((g) => parseInt(g, 16));
+  return groups.length === 8 && groups.every((g) => Number.isInteger(g) && g >= 0 && g <= 0xffff) ? groups : null;
+}
+
 export function isPrivateIp(ip: string): boolean {
   if (isIP(ip) === 4) return privateV4(ip);
-  const v6 = ip.toLowerCase();
-  const mapped = v6.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (mapped) return privateV4(mapped[1]);
-  return v6 === '::' || v6 === '::1' || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6);
+  const g = expandV6(ip);
+  // 解析不了的一律当作不安全
+  if (!g) return true;
+  const v4 = `${g[6] >> 8}.${g[6] & 255}.${g[7] >> 8}.${g[7] & 255}`;
+  const zeros = (n: number) => g.slice(0, n).every((x) => x === 0);
+  // 内嵌 IPv4 的几种写法：::ffff:a.b.c.d（映射）、::a.b.c.d（兼容，含 :: 和 ::1）、64:ff9b::/96（NAT64）
+  if (zeros(5) && (g[5] === 0xffff || g[5] === 0)) return g[5] === 0 && g[6] === 0 && g[7] <= 1 ? true : privateV4(v4);
+  if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return privateV4(v4);
+  // fc00::/7 唯一本地地址、fe80::/10 链路本地、ff00::/8 组播
+  return (g[0] & 0xfe00) === 0xfc00 || (g[0] & 0xffc0) === 0xfe80 || (g[0] & 0xff00) === 0xff00;
 }
 
 /** 主机名解析到内网 / 本机地址时抛出 403 */

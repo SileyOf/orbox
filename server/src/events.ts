@@ -22,6 +22,12 @@ export function subscribe(userId: number, res: ServerResponse): () => void {
   };
 }
 
+/** 断开某个用户所有打开着的网页的实时连接（被停用、被强制下线、重置密码时） */
+export function disconnect(userId: number): void {
+  for (const res of clients.get(userId) || []) res.end();
+  clients.delete(userId);
+}
+
 export function emit(userId: number, event: AppEvent): void {
   const set = clients.get(userId);
   if (!set) return;

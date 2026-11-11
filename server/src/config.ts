@@ -1,23 +1,46 @@
-function required(name: string): string {
-  const v = process.env[name];
-  if (!v) throw new Error(`缺少环境变量 ${name}`);
-  return v;
+import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+
+// 配置来源：环境变量（.env）优先，其次是安装向导写入数据目录的 config.json。
+// 两边都没有数据库配置时，启动后进入"首次安装"页面，由用户在网页里填写。
+
+/** 数据目录：保存安装向导写入的配置。Docker 里是 /app/data，需要挂载卷才能在重建容器后保留 */
+export const DATA_DIR = path.resolve(process.env.DATA_DIR || 'data');
+const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+
+interface SavedConfig {
+  db?: { host: string; port: number; user: string; password: string; database: string };
+  appSecret?: string;
+  publicUrl?: string;
 }
 
+function readSaved(): SavedConfig {
+  try {
+    return JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) as SavedConfig;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') console.error(`[config] 读取 ${CONFIG_FILE} 失败：${(e as Error).message}`);
+    return {};
+  }
+}
+let saved = readSaved();
+const env = process.env;
+
 export const APP_NAME = 'Orbox';
-export const APP_VERSION = '0.5.1';
+export const APP_VERSION = '0.6.0';
 
 export const config = {
   port: Number(process.env.PORT || 8787),
-  publicUrl: normalizePublicUrl(process.env.PUBLIC_URL),
+  publicUrl: normalizePublicUrl(env.PUBLIC_URL || saved.publicUrl),
   db: {
-    host: required('DB_HOST'),
-    port: Number(process.env.DB_PORT || 3306),
-    user: required('DB_USER'),
-    password: process.env.DB_PASSWORD || '',
-    database: required('DB_NAME'),
+    host: env.DB_HOST || saved.db?.host || '',
+    port: Number(env.DB_PORT || saved.db?.port || 3306),
+    user: env.DB_USER || saved.db?.user || '',
+    password: env.DB_HOST ? env.DB_PASSWORD || '' : (saved.db?.password ?? ''),
+    database: env.DB_NAME || saved.db?.database || '',
   },
-  appSecret: required('APP_SECRET'),
+  appSecret: env.APP_SECRET || saved.appSecret || '',
+  /** 哪些配置来自环境变量（网页里不能改，只能改 .env） */
+  fromEnv: { db: !!env.DB_HOST, appSecret: !!env.APP_SECRET, publicUrl: !!env.PUBLIC_URL },
   allowRegistration: process.env.ALLOW_REGISTRATION !== 'false',
   telegramToken: process.env.TELEGRAM_BOT_TOKEN || '',
   telegramProxy: process.env.TELEGRAM_PROXY || '',
@@ -61,3 +84,42 @@ function normalizePublicUrl(raw?: string): string {
     throw new Error(`PUBLIC_URL 格式不对：${raw}，应写成 https://你的域名`);
   }
 }
+
+/** 数据库和密钥都已配置（来自 .env 或安装向导） */
+export const isConfigured = () => !!(config.db.host && config.db.user && config.db.database && config.appSecret);
+
+/** 安装向导 / 后台保存配置：写入数据目录的 config.json（仅属主可读写），并立即生效 */
+export function saveConfig(patch: SavedConfig): void {
+  const next: SavedConfig = { ...saved, ...patch };
+  mkdirSync(DATA_DIR, { recursive: true });
+  writeFileSync(CONFIG_FILE, JSON.stringify(next, null, 2), { mode: 0o600 });
+  chmodSync(CONFIG_FILE, 0o600);
+  saved = next;
+  if (patch.db && !config.fromEnv.db) Object.assign(config.db, patch.db);
+  if (patch.appSecret && !config.fromEnv.appSecret) config.appSecret = patch.appSecret;
+  if (patch.publicUrl && !config.fromEnv.publicUrl) config.publicUrl = normalizePublicUrl(patch.publicUrl);
+}
+
+/** 安装中途失败时撤销已写入的配置，回到未安装状态 */
+export function clearSavedConfig(): void {
+  rmSync(CONFIG_FILE, { force: true });
+  saved = {};
+  if (!config.fromEnv.db) Object.assign(config.db, { host: '', port: 3306, user: '', password: '', database: '' });
+  if (!config.fromEnv.appSecret) config.appSecret = '';
+}
+
+/**
+ * 数据目录是否是挂载的卷。只在 Docker 里判断（和根文件系统不在同一个设备上即认为已挂载）；
+ * 其他环境返回 null 表示不适用。没挂载时容器重建会丢失 config.json 里的密钥，邮箱密码将无法解密。
+ */
+export function dataDirPersistent(): boolean | null {
+  if (!env.ORBOX_DOCKER) return null;
+  try {
+    mkdirSync(DATA_DIR, { recursive: true });
+    return statSync(DATA_DIR).dev !== statSync('/').dev;
+  } catch {
+    return false;
+  }
+}
+
+export const normalizeUrl = normalizePublicUrl;

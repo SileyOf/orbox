@@ -662,7 +662,8 @@ export function worker(accountId: number): AccountWorker {
 }
 
 export async function startAllAccounts() {
-  const rows = await query<{ id: number }>('SELECT id FROM accounts');
+  // 停用的用户不同步
+  const rows = await query<{ id: number }>('SELECT a.id FROM accounts a JOIN users u ON u.id = a.user_id WHERE u.disabled = 0');
   for (const { id } of rows) await startAccount(id);
   console.log(`[mail] ${rows.length} 个邮箱开始同步`);
 }

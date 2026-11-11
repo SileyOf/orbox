@@ -10,7 +10,7 @@ const TICK = 15_000;
 /** 一直不处理的任务最多连续催这么多次，之后保持未完成但不再打扰 */
 const MAX_NAGS = 8;
 
-async function tick() {
+async function reminders() {
   const due = await query<TaskRow>(
     `SELECT * FROM tasks WHERE status = 'open' AND next_remind_at <= UTC_TIMESTAMP() ORDER BY next_remind_at LIMIT 50`,
   );
@@ -28,7 +28,10 @@ async function tick() {
     await dispatchTaskReminder(task, task.nag_count).catch((e) => console.error('[reminder]', e.message));
   }
 
-  // 稍后处理到点：重新标为未读让它回到收件箱顶部的视线里，并提醒一次
+}
+
+// 稍后处理到点：重新标为未读让它回到收件箱顶部的视线里，并提醒一次
+async function resurface() {
   const snoozed = await query<{ id: number; user_id: number; account_id: number }>(
     'SELECT id, user_id, account_id FROM messages WHERE snoozed_until <= UTC_TIMESTAMP() LIMIT 20',
   );
@@ -39,9 +42,25 @@ async function tick() {
     await dispatchResurfaced(m.user_id, m.id).catch((e) => console.error('[snooze]', e.message));
   }
 
-  await flushOutbox();
+}
+
+let lastCleanup = 0;
+/** 过期会话、绑定码、用过期的邀请码：每小时清一次就够了 */
+async function cleanup() {
+  if (Date.now() - lastCleanup < 3600_000) return;
+  lastCleanup = Date.now();
   await exec('DELETE FROM sessions WHERE expires_at < UTC_TIMESTAMP()');
-  await runDigests();
+  await exec('DELETE FROM bot_link_codes WHERE expires_at < UTC_TIMESTAMP()');
+}
+
+async function tick() {
+  for (const [name, step] of [['reminder', reminders], ['snooze', resurface], ['outbox', () => flushOutbox()], ['cleanup', cleanup], ['digest', runDigests]] as const) {
+    try {
+      await step();
+    } catch (e: any) {
+      console.error(`[scheduler] ${name}：${e?.message || e}`);
+    }
+  }
 }
 
 export function startScheduler(): () => void {

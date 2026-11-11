@@ -143,7 +143,9 @@ async function tryBind(platform: Platform, chatId: string, text: string, usernam
 
 async function userOfChat(platform: Platform, chatId: string): Promise<User | undefined> {
   const row = await one<{ user_id: number }>('SELECT user_id FROM bot_links WHERE platform = ? AND chat_id = ?', [platform, chatId]);
-  return row ? getUser(Number(row.user_id)) : undefined;
+  const user = row ? await getUser(Number(row.user_id)) : undefined;
+  // 被停用或被收回机器人权限的用户，当作没绑定
+  return user?.perms.bots ? user : undefined;
 }
 
 const notLinked = () =>

@@ -1,5 +1,4 @@
-import { installLogger } from './log.js';
-installLogger();
+import './log.js';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,8 +8,9 @@ import fastifyStatic from '@fastify/static';
 import Fastify from 'fastify';
 import { ZodError } from 'zod';
 import { authRoutes } from './auth.js';
-import { config } from './config.js';
-import { pool } from './db.js';
+import { config, isConfigured } from './config.js';
+import { closePool, dbHint, getPool, one } from './db.js';
+import { runSetup } from './setup.js';
 import { setNewMailHandler, startAllAccounts, stopAllAccounts } from './mail/manager.js';
 import { migrate } from './migrate.js';
 import { loadSite } from './site.js';
@@ -26,6 +26,31 @@ import { mcpRoutes } from './routes/mcp.js';
 import { publicRoutes } from './routes/public.js';
 import { adminRoutes, siteRoutes } from './routes/admin.js';
 import { startScheduler } from './tasks/scheduler.js';
+
+// 某个后台任务（同步、推送、机器人）里漏接的异步错误不应该让整个服务退出重启：记下来继续跑
+process.on('unhandledRejection', (reason) => console.error('[orbox] 未处理的异步错误：', (reason as Error)?.stack || reason));
+
+const webDist = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
+
+// 首次安装：.env 和数据目录里都没有数据库配置时，先运行安装向导，装完再继续往下启动
+if (!isConfigured()) await runSetup(webDist);
+
+// 数据库连不上时给出一行能看懂的提示并持续重试，而不是带着堆栈反复崩溃重启
+for (;;) {
+  try {
+    await getPool().query('SELECT 1');
+    break;
+  } catch (e: any) {
+    const { host, port } = config.db;
+    const hint = dbHint(e);
+    console.error(`[db] 无法连接 ${host}:${port}（${e.code || e.message}）${hint ? '。' + hint : ''}，5s 后重试`);
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+}
+await migrate();
+await loadSite();
+// 数据库是通过 .env 配置的全新库：还没有任何用户时，同样用安装向导创建管理员
+if (!(await one<{ n: number }>('SELECT COUNT(*) AS n FROM users'))!.n) await runSetup(webDist);
 
 const app = Fastify({ logger: { level: 'warn' }, bodyLimit: 10 * 1024 * 1024, trustProxy: true, forceCloseConnections: true });
 
@@ -47,14 +72,13 @@ app.addHook('onSend', async (_req, reply) => {
 
 // 跨站请求防护：改数据的请求如果带了 Origin，必须来自本站（同站的其他子域名也不行）。
 // Cookie 的 SameSite=Lax 已挡住其他网站，这里再防一层同主域下的其他子站。
-const allowedOrigins = new Set([new URL(config.publicUrl).origin]);
 app.addHook('onRequest', async (req, reply) => {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method) || !req.url.startsWith('/api/')) return;
   const origin = req.headers.origin;
   if (!origin) return;
   const host = req.headers['x-forwarded-host'] || req.headers.host;
   const proto = req.headers['x-forwarded-proto'] || req.protocol;
-  if (allowedOrigins.has(origin) || origin === `${proto}://${host}`) return;
+  if (origin === config.publicUrl || origin === `${proto}://${host}`) return;
   return reply.code(403).send({ error: '跨站请求被拒绝' });
 });
 
@@ -72,7 +96,6 @@ await app.register(adminRoutes);
 await app.register(siteRoutes);
 
 // 生产环境由同一个进程托管前端构建产物
-const webDist = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
 if (existsSync(webDist)) {
   await app.register(fastifyStatic, { root: webDist });
   app.setNotFoundHandler((req, reply) =>
@@ -80,29 +103,6 @@ if (existsSync(webDist)) {
   );
 }
 
-// 数据库连不上时给出一行能看懂的提示并持续重试，而不是带着堆栈反复崩溃重启
-for (;;) {
-  try {
-    await pool.query('SELECT 1');
-    break;
-  } catch (e: any) {
-    const { host, port } = config.db;
-    const hint =
-      e.code === 'ETIMEDOUT'
-        ? '连接超时：多半是数据库所在机器的防火墙/安全组没有放行本机，或 MySQL 只监听了 127.0.0.1'
-        : e.code === 'ECONNREFUSED'
-          ? '连接被拒绝：地址或端口不对。注意容器里的 127.0.0.1 是容器自己，同机数据库请用 host.docker.internal'
-          : e.code === 'ER_ACCESS_DENIED_ERROR' || e.code === 'ER_DBACCESS_DENIED_ERROR'
-            ? '账号、密码或授权的来源主机不对'
-            : e.code === 'ER_BAD_DB_ERROR'
-              ? '数据库不存在，请先建库'
-              : '';
-    console.error(`[db] 无法连接 ${host}:${port}（${e.code || e.message}）${hint ? '。' + hint : ''}，5s 后重试`);
-    await new Promise((r) => setTimeout(r, 5000));
-  }
-}
-await migrate();
-await loadSite();
 await migrateLegacyAi();
 void startBots();
 setNewMailHandler(dispatchNewMail);
@@ -118,7 +118,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     stopAllAccounts();
     await stopBots();
     await app.close();
-    await pool.end();
+    await closePool();
     process.exit(0);
   });
 }

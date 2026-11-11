@@ -7,11 +7,12 @@ import { providerInput, publicProvider, saveProvider } from '../ai/tasks.js';
 import type { ProviderRow } from '../ai/tasks.js';
 import { discordInviteUrl } from '../bots/discord.js';
 import { botStatus, restartBot } from '../bots/hub.js';
-import { APP_VERSION, config } from '../config.js';
+import { APP_VERSION, config, normalizeUrl, saveConfig } from '../config.js';
 import { hashPassword } from '../crypto.js';
 import { exec, one, query } from '../db.js';
 import { logFile, recentLogs } from '../log.js';
-import { stopAccount } from '../mail/manager.js';
+import { disconnect } from '../events.js';
+import { startAccount, stopAccount } from '../mail/manager.js';
 import { microsoftRedirectUri } from '../mail/oauth.js';
 import { integration, maskedIntegrations, permsSchema, publicSite, saveIntegration, saveSite, siteConfig, siteSchema } from '../site.js';
 import type { Integrations } from '../site.js';
@@ -72,7 +73,27 @@ export async function adminRoutes(app: FastifyInstance) {
       ),
       bots: botStatus(),
       publicUrl: config.publicUrl,
+      /** .env 里没写 PUBLIC_URL 时可以在网页里改 */
+      publicUrlEditable: !config.fromEnv.publicUrl,
     };
+  });
+
+  /** 修改对外地址（安装向导里填的那个）。写入数据目录的 config.json，立即生效 */
+  app.put('/api/admin/public-url', async (req, reply) => {
+    if (config.fromEnv.publicUrl) return reply.code(400).send({ error: '对外地址来自 .env 的 PUBLIC_URL，请修改 .env 后重启' });
+    const { url } = z.object({ url: z.string().trim().min(1).max(200) }).parse(req.body);
+    let next: string;
+    try {
+      next = normalizeUrl(url);
+    } catch {
+      return reply.code(400).send({ error: '地址格式不对，应该像 https://box.example.com' });
+    }
+    try {
+      saveConfig({ publicUrl: next });
+    } catch (e: any) {
+      return reply.code(500).send({ error: `无法写入数据目录：${e.message}` });
+    }
+    return { publicUrl: config.publicUrl };
   });
 
   // ---- 站点外观与注册 ----
@@ -199,7 +220,15 @@ export async function adminRoutes(app: FastifyInstance) {
     if (body.isAdmin !== undefined) await exec('UPDATE users SET is_admin = ? WHERE id = ?', [+body.isAdmin, id]);
     if (body.disabled !== undefined) {
       await exec('UPDATE users SET disabled = ? WHERE id = ?', [+body.disabled, id]);
-      if (body.disabled) await exec('DELETE FROM sessions WHERE user_id = ?', [id]);
+      // 停用：下线、断开实时连接、停止同步他的邮箱；重新启用时恢复同步
+      const accounts = await query<{ id: number }>('SELECT id FROM accounts WHERE user_id = ?', [id]);
+      if (body.disabled) {
+        await exec('DELETE FROM sessions WHERE user_id = ?', [id]);
+        disconnect(id);
+        for (const a of accounts) stopAccount(a.id);
+      } else {
+        for (const a of accounts) await startAccount(a.id);
+      }
     }
     if (body.name) await exec('UPDATE users SET name = ? WHERE id = ?', [body.name, id]);
     if (body.email) await exec('UPDATE users SET email = ? WHERE id = ?', [body.email, id]);
@@ -211,6 +240,7 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>('/api/admin/users/:id/logout', async (req, reply) => {
     if (Number(req.params.id) === req.user.id) return reply.code(400).send({ error: '要退出自己的其他设备，请在 设置 → 账户 里点"退出其他设备"' });
     const res = await exec('DELETE FROM sessions WHERE user_id = ?', [req.params.id]);
+    disconnect(Number(req.params.id));
     return { ok: true, count: res.affectedRows };
   });
 
@@ -219,6 +249,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const password = `${randomCode(4)}-${randomCode(4)}-${randomCode(4)}`;
     await exec('UPDATE users SET password_hash = ? WHERE id = ?', [await hashPassword(password), req.params.id]);
     await exec('DELETE FROM sessions WHERE user_id = ?', [req.params.id]);
+    disconnect(Number(req.params.id));
     return { password };
   });
 
@@ -227,6 +258,7 @@ export async function adminRoutes(app: FastifyInstance) {
     if (id === req.user.id) return reply.code(400).send({ error: '不能删除自己' });
     for (const a of await query<{ id: number }>('SELECT id FROM accounts WHERE user_id = ?', [id])) stopAccount(a.id);
     await exec('DELETE FROM users WHERE id = ?', [id]);
+    disconnect(id);
     return { ok: true };
   });
 

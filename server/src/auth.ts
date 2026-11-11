@@ -116,11 +116,12 @@ export function publicUser(u: User) {
 }
 
 export async function getUser(id: number): Promise<User | undefined> {
-  const row = await one('SELECT * FROM users WHERE id = ?', [id]);
+  // 停用的用户视为不存在：他的 MCP 令牌、聊天机器人和各种推送随之失效
+  const row = await one('SELECT * FROM users WHERE id = ? AND disabled = 0', [id]);
   return row ? toUser(row) : undefined;
 }
 
-async function startSession(req: FastifyRequest, reply: FastifyReply, userId: number) {
+export async function startSession(req: FastifyRequest, reply: FastifyReply, userId: number) {
   const token = randomToken();
   const expires = new Date(Date.now() + SESSION_DAYS * 86400_000);
   await exec('INSERT INTO sessions (id, user_id, user_agent, expires_at) VALUES (?, ?, ?, ?)', [

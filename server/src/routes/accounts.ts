@@ -240,6 +240,9 @@ export async function accountRoutes(app: FastifyInstance) {
           [req.user.id, grant.email],
         );
         let id = existing?.id;
+        const max = req.user.perms.maxAccounts;
+        if (!id && max && (await one<{ n: number }>('SELECT COUNT(*) AS n FROM accounts WHERE user_id = ?', [req.user.id]))!.n >= max)
+          return done({ oauth_error: `最多只能添加 ${max} 个邮箱，需要更多请联系管理员` });
         if (id) {
           forgetAccessToken(id);
           await exec('UPDATE accounts SET oauth_refresh_enc = ?, smtp_host = ?, last_error = NULL WHERE id = ?', [

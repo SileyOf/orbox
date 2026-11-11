@@ -1,16 +1,23 @@
-# 直接使用 Docker Hub 上的镜像部署，不需要源码。
-# 用法：把本文件和 .env（参考 .env.example）放在同一目录，执行
+# 直接使用 Docker Hub 上的镜像部署，不需要源码，也不需要先写配置文件。
+# 用法：
 #   docker compose -f docker-compose.hub.yml up -d
+#   docker compose -f docker-compose.hub.yml logs | grep 安装码
+# 然后打开网页，按安装向导填写数据库、站点名称和管理员账号。
+# 也可以把配置写在同目录的 .env 里（参考 .env.example），.env 优先于向导保存的配置。
 # 升级：docker compose -f docker-compose.hub.yml pull && docker compose -f docker-compose.hub.yml up -d
-# 想固定版本，把 latest 换成具体版本号，例如 0.5.1。
+# 想固定版本，把 latest 换成具体版本号，例如 0.6.0。
 services:
   orbox:
     image: yuki955/orbox:latest
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       LOG_DIR: /app/logs
     volumes:
+      # 安装向导保存的配置和密钥在这里，务必保留（备份时带上它）
+      - orbox-data:/app/data
       - orbox-logs:/app/logs
     ports:
       - "127.0.0.1:8787:8787"
@@ -19,4 +26,5 @@ services:
       - "host.docker.internal:host-gateway"
 
 volumes:
+  orbox-data:
   orbox-logs:

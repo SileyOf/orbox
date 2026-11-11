@@ -63,6 +63,7 @@ interface OverviewData {
   dbSize: number;
   bots: BotState[];
   publicUrl: string;
+  publicUrlEditable: boolean;
 }
 
 interface BotState {
@@ -83,7 +84,8 @@ const duration = (s: number) => (s > 86400 ? `${Math.floor(s / 86400)} 天` : s 
 
 function Overview() {
   const user = useUser();
-  const d = useQuery({ queryKey: ['admin-overview'], queryFn: () => api<OverviewData>('/admin/overview'), refetchInterval: 30_000 }).data;
+  const overview = useQuery({ queryKey: ['admin-overview'], queryFn: () => api<OverviewData>('/admin/overview'), refetchInterval: 30_000 });
+  const d = overview.data;
   if (!d) return <div className="muted">加载中…</div>;
   return (
     <>
@@ -105,7 +107,23 @@ function Overview() {
           <Setting title="版本">v{d.version}</Setting>
           <Setting title="运行时间">{duration(d.uptime)} · Node {d.node}</Setting>
           <Setting title="数据库占用">{size(d.dbSize)}</Setting>
-          <Setting title="对外地址" hint="来自 .env 的 PUBLIC_URL，决定登录 Cookie、OAuth 回调和机器人里的链接">{d.publicUrl}</Setting>
+          <Setting title="对外地址" hint={`决定登录 Cookie、OAuth 回调和机器人里的链接。${d.publicUrlEditable ? '换域名或启用 HTTPS 后记得改这里' : '来自 .env 的 PUBLIC_URL，修改 .env 后重启生效'}`}>
+            {d.publicUrl}
+            {d.publicUrlEditable && (
+              <button
+                className="btn sm"
+                onClick={() => {
+                  const url = prompt('对外地址（例如 https://box.example.com）', d.publicUrl);
+                  if (url && url !== d.publicUrl)
+                    api('/admin/public-url', { method: 'PUT', body: { url } })
+                      .then(() => (toast('已保存'), overview.refetch()))
+                      .catch(toastError);
+                }}
+              >
+                <Pencil size={14} /> 修改
+              </button>
+            )}
+          </Setting>
         </div>
       </Section>
       <Section title="聊天平台">

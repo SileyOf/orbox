@@ -7,3 +7,5 @@ release
 .upgrade-backup
 .DS_Store
 **/.DS_Store
+data
+**/data

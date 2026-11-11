@@ -612,3 +612,27 @@ h1, h2, h3 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 .empty-hint { padding: 14px 16px; color: var(--muted); cursor: pointer; font-size: 13px; }
 .empty-hint:hover { background: var(--soft); }
 .task-group h3.row { display: flex; align-items: center; gap: 6px; }
+
+/* ---------- 首次安装向导 ---------- */
+.setup-card { width: min(560px, 100%); }
+.setup-steps { display: flex; gap: 6px; list-style: none; margin: 0; padding: 0; }
+.setup-steps li { flex: 1; display: flex; align-items: center; gap: 6px; padding: 7px 10px; border-radius: 10px; background: var(--soft); color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.setup-steps li i { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; background: var(--panel); flex: none; }
+.setup-steps li.on { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
+.setup-steps li.done { color: var(--ink); }
+.setup-steps li.done i { background: var(--accent); color: var(--on-accent); }
+.setup-form { display: grid; gap: 14px; }
+.setup-form p { margin: 0; }
+.setup-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+.setup-hint { font-size: 12px; color: var(--muted); font-weight: 400; }
+.setup-cmd { margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--soft); font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-x: auto; user-select: all; }
+.setup-code { font: 600 18px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .12em; text-align: center; height: 46px; }
+.setup-note { display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border-radius: 10px; font-size: 12.5px; }
+.setup-note.ok { background: var(--accent-soft); color: var(--accent-ink); align-items: center; }
+.setup-note.warn { background: color-mix(in oklab, #e9bf36 16%, var(--panel)); }
+.setup-note input { margin-top: 2px; flex: none; }
+@media (max-width: 520px) {
+  .setup-grid { grid-template-columns: 1fr; }
+  .setup-steps li { padding: 7px 6px; justify-content: center; }
+  .setup-steps li:not(.on) { font-size: 0; gap: 0; }
+}

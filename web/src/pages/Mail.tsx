@@ -17,7 +17,7 @@ import type { MenuItem } from '../components/ContextMenu';
 import { useSelection } from '../hooks/useSelection';
 import { Conversation } from '../components/Conversation';
 import { LinksPanel } from '../components/LinksPanel';
-import { MessageBody, sanitizeMail } from '../components/MessageBody';
+import { MessageBody, sanitizeForEditor } from '../components/MessageBody';
 import { copyText, dueLabel, escapeHtml, fileSize, fullDate, shortDate, toast, toastError } from '../lib';
 
 interface Page {
@@ -60,10 +60,8 @@ function signatureHtml(a?: Account): string {
   return a?.signature ? `<br><br><div>-- <br>${escapeHtml(a.signature).replace(/\n/g, '<br>')}</div>` : '';
 }
 
-function quoted(m: MessageFull): string {
-  const body = m.body_html
-    ? new DOMParser().parseFromString(sanitizeMail(m.body_html), 'text/html').body.innerHTML
-    : escapeHtml(m.body_text || '').replace(/\n/g, '<br>');
+function quoted(m: MessageFull, blockRemote: boolean): string {
+  const body = m.body_html ? sanitizeForEditor(m.body_html, blockRemote) : escapeHtml(m.body_text || '').replace(/\n/g, '<br>');
   return `<br><div>${fullDate(m.date)}，${escapeHtml(m.from_name || m.from_addr)} 写道：</div><blockquote style="margin:8px 0;padding-left:12px;border-left:3px solid #d5d9d2;color:#666">${body}</blockquote>`;
 }
 
@@ -189,9 +187,8 @@ export function MailPage() {
       cc: m.cc.map((a) => a.address).join(', '),
       bcc: '',
       subject: m.subject,
-      html: m.body_html
-        ? new DOMParser().parseFromString(sanitizeMail(m.body_html), 'text/html').body.innerHTML
-        : escapeHtml(m.body_text || '').replace(/\n/g, '<br>'),
+      // 草稿是自己写的，但也可能是从别的客户端存进来的转发内容，同样清理一遍
+      html: m.body_html ? sanitizeForEditor(m.body_html, user.settings.blockRemoteImages) : escapeHtml(m.body_text || '').replace(/\n/g, '<br>'),
       draftOf: m.id,
       files: [],
     });
@@ -219,7 +216,7 @@ export function MailPage() {
       return setCompose(saved && accountOf(saved.accountId) ? { ...saved, files: [] } : blank);
     }
     if (kind === 'forward') {
-      return setCompose({ ...blank, subject: withPrefix('Fwd', m.subject), html: signatureHtml(account) + quoted(m), forwardOf: m.id });
+      return setCompose({ ...blank, subject: withPrefix('Fwd', m.subject), html: signatureHtml(account) + quoted(m, user.settings.blockRemoteImages), forwardOf: m.id });
     }
     const mine = account.email.toLowerCase();
     const others = [...m.to, ...m.cc].map((a) => a.address).filter((a) => a && a.toLowerCase() !== mine);
@@ -228,7 +225,7 @@ export function MailPage() {
       to: m.reply_to || m.from_addr,
       cc: kind === 'replyAll' ? [...new Set(others)].join(', ') : '',
       subject: withPrefix('Re', m.subject),
-      html: (prefill ? escapeHtml(prefill).split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('') : '') + signatureHtml(account) + quoted(m),
+      html: (prefill ? escapeHtml(prefill).split(/\n{2,}/).map((p) => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('') : '') + signatureHtml(account) + quoted(m, user.settings.blockRemoteImages),
       replyTo: m.id,
     });
   }

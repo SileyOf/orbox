@@ -43,7 +43,10 @@ function push(level: LogLine['level'], args: unknown[]) {
 }
 
 /** 接管 console，之后所有模块里的 console.log / warn / error 都会进入日志 */
+let installed = false;
 export function installLogger() {
+  if (installed) return;
+  installed = true;
   const orig = { log: console.log, info: console.info, warn: console.warn, error: console.error };
   console.log = (...a: unknown[]) => (push('info', a), orig.log(...a));
   console.info = (...a: unknown[]) => (push('info', a), orig.info(...a));
@@ -62,3 +65,6 @@ export function recentLogs(opts: { level?: string; q?: string; limit?: number })
 }
 
 export const logFile = () => file || null;
+
+// 导入即生效：index.ts 第一行就导入本模块，这样其他模块在加载阶段打印的内容（例如配置警告）也能进日志
+installLogger();

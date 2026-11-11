@@ -30,6 +30,25 @@ GRANT ALL PRIVILEGES ON orbox.* TO 'orbox'@'%';
 
 ## 3. 配置
 
+配置有两种方式，任选其一：
+
+**方式一：网页安装向导（推荐）。** 不写 `.env`（或 `.env` 里不填数据库），直接启动。第一次打开网页会进入安装向导：
+
+1. 输入**安装码**。它打印在启动日志里：`docker compose logs | grep 安装码`。只有能看到服务器日志的人才能安装，防止别人抢先配置你的实例。
+2. 填**数据库**地址、账号、库名。会检查是不是 MySQL 8、能不能连上；库不存在时自动创建。
+3. 填**站点名称**、访问地址（默认就是你当前打开的地址）、时区、是否允许别人注册。
+4. 创建**管理员账号**。完成后自动登录。
+
+向导会自动生成 `APP_SECRET`，和数据库连接一起保存在数据目录的 `config.json` 里（Docker 里是 `/app/data`，compose 文件已把它挂到 `orbox-data` 卷）。
+**这个卷必须保留并备份**：丢了它，已保存的邮箱密码就无法解密。
+
+- 迁移到新服务器 / 接管已有数据的库：在数据库那一步展开"高级选项"，填原来的 `APP_SECRET`，会沿用库里已有的用户和设置。
+- 重新运行向导：停止容器，删除数据卷里的 `config.json` 后再启动（数据库里的数据不受影响，但要记得原来的 `APP_SECRET`）。
+- 换域名或启用 HTTPS 后，在 后台 → 概览 里修改"对外地址"。
+
+**方式二：`.env` 文件。** 适合用脚本部署或想把配置纳入版本管理的情况。`.env` 里的配置优先于向导保存的配置。
+数据库通过 `.env` 配好、但库里还没有任何用户时，第一次打开网页同样会进入向导，只是跳过数据库那一步。
+
 把代码放到服务器（例如 `/opt/orbox`），然后：
 
 ```bash
@@ -163,6 +182,9 @@ Outlook / Hotmail / Microsoft 365 已停用密码登录，必须注册一个 Mic
 
 ## 8. 备份
 
+> 用安装向导安装的实例，除了数据库还要备份 `orbox-data` 数据卷里的 `config.json`（里面有 `APP_SECRET`）：
+> `docker compose cp orbox:/app/data/config.json ./config.json.bak`
+
 邮件本身始终在邮件服务器上，Orbox 的数据库里只是缓存，丢了可以重新同步。需要备份的是：
 
 - **`.env`**，尤其是 `APP_SECRET`。
@@ -214,7 +236,9 @@ sh orbox-upgrade-0.1.0-to-0.1.1/upgrade.sh /opt/orbox
 
 | 现象 | 原因和处理 |
 |---|---|
-| 启动即退出，提示"缺少环境变量" | `.env` 里对应项没填 |
+| 打开网页是"安装 Orbox"而不是登录页 | 没有找到数据库配置（`.env` 没填，数据目录里也没有 `config.json`）。新装是正常的；如果是已有实例突然出现，说明 `orbox-data` 数据卷没挂上或被删了，恢复它或在向导的高级选项里填原来的 `APP_SECRET` |
+| 向导提示"没有检测到 /app/data 的数据卷" | compose 文件里缺少 `orbox-data:/app/data` 这一行。请用仓库里最新的 compose 文件 |
+| 安装码找不到 | `docker compose logs \| grep 安装码`；日志太长被冲掉时重启容器会重新打印（也可以在 `.env` 里用 `SETUP_CODE` 固定一个） |
 | 启动报 `Invalid URL` / `PUBLIC_URL 格式不对` | `PUBLIC_URL` 要写完整地址，例如 `https://orbox.example.com`（0.5.1 起只写域名也会自动补 `https://`） |
 | `[db] 无法连接…ETIMEDOUT` | 容器到数据库的网络不通，见下方"数据库连不上" |
 | `[db] 无法连接…ECONNREFUSED` | 地址或端口不对。`DB_HOST` 写成了 `127.0.0.1` / `localhost` 时指向的是容器自己 |

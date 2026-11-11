@@ -22,6 +22,7 @@ const listQuery = z.object({
 });
 
 const ids = z.array(z.number().int()).min(1).max(500);
+const MAX_ATTACH_TOTAL = 40 * 1024 * 1024;
 
 interface Located {
   id: number;
@@ -151,7 +152,8 @@ export async function mailRoutes(app: FastifyInstance) {
         params.push(ft);
       } else {
         where.push('(m.subject LIKE ? OR m.from_name LIKE ?)');
-        params.push(`%${p.q}%`, `%${p.q}%`);
+        const like = `%${p.q.replace(/[%_\\]/g, '\\$&')}%`;
+        params.push(like, like);
       }
       where.push(`(f.role IS NULL OR f.role NOT IN ('trash', 'junk'))`);
     } else if (p.view === 'starred') {
@@ -302,11 +304,20 @@ export async function mailRoutes(app: FastifyInstance) {
   async function readCompose(req: FastifyRequest) {
     let payload: unknown;
     const files: { filename: string; content: Buffer; contentType: string }[] = [];
+    let total = 0;
     for await (const part of req.parts()) {
       if (part.type === 'file') {
-        files.push({ filename: part.filename, content: await part.toBuffer(), contentType: part.mimetype });
+        const content = await part.toBuffer();
+        total += content.length;
+        // 大多数邮件服务器单封上限在 25–50MB，超过了发也发不出去，还白占内存
+        if (total > MAX_ATTACH_TOTAL) throw Object.assign(new Error('附件总大小不能超过 40MB'), { statusCode: 413 });
+        files.push({ filename: part.filename, content, contentType: part.mimetype });
       } else if (part.fieldname === 'payload') {
-        payload = JSON.parse(String(part.value));
+        try {
+          payload = JSON.parse(String(part.value));
+        } catch {
+          throw Object.assign(new Error('请求格式不正确'), { statusCode: 400 });
+        }
       }
     }
     const addrs = z.array(z.string().trim().min(3).max(320)).max(100).default([]);
