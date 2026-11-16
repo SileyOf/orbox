@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { APP_VERSION, config } from './config.js';
 import { hashPassword, randomToken, sha256, verifyPassword } from './crypto.js';
 import { exec, one, query } from './db.js';
+import { mailerReady, sendCode } from './mailer.js';
+import { beginTwoFactor } from './routes/security.js';
 import { ALL_PERMS, publicSite, siteConfig } from './site.js';
 import type { Perms } from './site.js';
 
@@ -81,6 +83,9 @@ export interface User {
   settings: UserSettings;
   /** 生效的权限（管理员全开；没单独设置的用站点默认） */
   perms: Perms;
+  emailVerified: boolean;
+  /** 是否开启了两步验证 */
+  twoFactor: boolean;
 }
 
 declare module 'fastify' {
@@ -89,7 +94,7 @@ declare module 'fastify' {
   }
 }
 
-function toUser(row: any): User {
+export function toUser(row: any): User {
   return {
     id: Number(row.id),
     email: row.email,
@@ -97,6 +102,8 @@ function toUser(row: any): User {
     isAdmin: !!row.is_admin,
     timezone: row.timezone,
     perms: row.is_admin ? ALL_PERMS : { ...siteConfig().defaultPerms, ...(row.perms || {}) },
+    emailVerified: !!row.email_verified_at,
+    twoFactor: !!(row.totp_enabled || row.email_otp),
     settings: {
       ...defaultSettings,
       ...(row.settings || {}),
@@ -233,6 +240,8 @@ export async function authRoutes(app: FastifyInstance) {
     return {
       allowRegistration: first || site.registration !== 'closed',
       inviteRequired: !first && site.registration === 'invite',
+      /** 系统能发邮件时，登录页才显示"忘记密码" */
+      mail: mailerReady(),
       version: APP_VERSION,
       site: publicSite(),
     };
@@ -250,10 +259,20 @@ export async function authRoutes(app: FastifyInstance) {
     }
     if (limited(`r:${req.ip}`, 10)) return reply.code(429).send({ error: '注册太频繁，请稍后再试' });
     fail(`r:${req.ip}`);
-    if (await one('SELECT id FROM users WHERE email = ?', [body.email])) {
-      return reply.code(409).send({ error: '该邮箱已注册' });
+    // 要求验证邮箱：先建一个"待验证"的账号，输对邮件里的验证码才算注册成功并登录
+    const mustVerify = count > 0 && site.emailVerification === 'required' && mailerReady();
+    const existing = await one<{ id: number; verify_pending: number; last_login_at: Date | null }>(
+      'SELECT id, verify_pending, last_login_at FROM users WHERE email = ?',
+      [body.email],
+    );
+    if (existing) {
+      // 之前有人用这个邮箱注册但一直没通过验证：让真正的邮箱主人重新来一次
+      if (!(mustVerify && existing.verify_pending && !existing.last_login_at)) return reply.code(409).send({ error: '该邮箱已注册' });
+      await exec('UPDATE users SET name = ?, password_hash = ? WHERE id = ?', [body.name || body.email.split('@')[0], await hashPassword(body.password), existing.id]);
+      await sendCode(body.email, 'verify', existing.id, true);
+      return { verify: true, email: body.email };
     }
-    const res = await exec('INSERT INTO users (email, name, password_hash, is_admin, timezone, settings) VALUES (?, ?, ?, ?, ?, ?)', [
+    const res = await exec('INSERT INTO users (email, name, password_hash, is_admin, timezone, settings, verify_pending) VALUES (?, ?, ?, ?, ?, ?, ?)', [
       body.email,
       body.name || body.email.split('@')[0],
       await hashPassword(body.password),
@@ -261,6 +280,7 @@ export async function authRoutes(app: FastifyInstance) {
       site.defaultTimezone,
       // 新用户沿用站点的默认主题和强调色
       JSON.stringify({ theme: site.theme, accent: site.accent, followSite: true }),
+      +mustVerify,
     ]);
     if (count > 0 && site.registration === 'invite') {
       // 同一个邀请码被同时使用时只有一个能成功
@@ -269,6 +289,16 @@ export async function authRoutes(app: FastifyInstance) {
         await exec('DELETE FROM users WHERE id = ?', [res.insertId]);
         return reply.code(403).send({ error: '邀请码无效或已被使用' });
       }
+    }
+    if (mustVerify) {
+      try {
+        await sendCode(body.email, 'verify', res.insertId);
+      } catch (e) {
+        // 验证邮件发不出去就不要留下一个谁也登录不了的账号
+        await exec('DELETE FROM users WHERE id = ?', [res.insertId]);
+        throw e;
+      }
+      return { verify: true, email: body.email };
     }
     await startSession(req, reply, res.insertId);
     return publicUser((await getUser(res.insertId))!);
@@ -288,6 +318,14 @@ export async function authRoutes(app: FastifyInstance) {
     }
     failures.delete(keys[0]);
     if (row.disabled) return reply.code(403).send({ error: '这个账号已被管理员停用' });
+    if (row.verify_pending) {
+      // 注册后还没验证邮箱：重发一次验证码，让前端回到输入验证码那一步
+      if (mailerReady()) await sendCode(row.email, 'verify', Number(row.id), true).catch(() => {});
+      return reply.code(403).send({ error: '请先验证邮箱，验证码已发送到你的邮箱', verify: true, email: row.email });
+    }
+    // 开了两步验证：密码对了还不能登录，返回一张 10 分钟有效的票据，凭它提交第二步的验证码
+    const twoFactor = beginTwoFactor(row);
+    if (twoFactor) return { challenge: twoFactor };
     await exec('UPDATE users SET last_login_at = UTC_TIMESTAMP() WHERE id = ?', [row.id]);
     await startSession(req, reply, Number(row.id));
     return publicUser(toUser(row));

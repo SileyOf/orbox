@@ -10,7 +10,7 @@ import { emit } from '../events.js';
 import { connParams, startAccount, stopAccount, testConnection, worker } from '../mail/manager.js';
 import { SCRIPT_NAME, SieveClient, buildScript, parseScript, ruleSchema } from '../mail/sieve.js';
 import type { AccountRow } from '../mail/manager.js';
-import { exchangeMicrosoftCode, forgetAccessToken, microsoftAuthUrl, microsoftEnabled } from '../mail/oauth.js';
+import { exchangeOAuthCode, forgetAccessToken, isOAuthProvider, oauthAuthUrl, oauthEnabled, oauthLabel } from '../mail/oauth.js';
 
 const host = z.string().trim().min(1).max(190);
 const port = z.number().int().min(1).max(65535);
@@ -52,7 +52,7 @@ export async function accountRoutes(app: FastifyInstance) {
 
   app.get('/api/accounts', async (req) => {
     const accounts = await query(
-      `SELECT id, ${COLUMNS.join(', ')}, auth_type, sync_state, last_error, last_sync_at
+      `SELECT id, ${COLUMNS.join(', ')}, auth_type, oauth_provider, sync_state, last_error, last_sync_at
        FROM accounts WHERE user_id = ? ORDER BY sort, id`,
       [req.user.id],
     );
@@ -201,11 +201,13 @@ export async function accountRoutes(app: FastifyInstance) {
     }
   });
 
-  app.get('/api/oauth/providers', async () => ({ microsoft: microsoftEnabled() }));
+  app.get('/api/oauth/providers', async () => ({ microsoft: oauthEnabled('microsoft'), google: oauthEnabled('google') }));
 
-  // 浏览器整页跳转到 Microsoft 登录；state 同时存进 cookie，回调时比对以防跨站伪造
-  app.get<{ Querystring: { hint?: string } }>('/api/oauth/microsoft/start', async (req, reply) => {
-    if (!microsoftEnabled()) return reply.code(400).send({ error: '服务器未配置 Microsoft 登录' });
+  // 浏览器整页跳转到 Microsoft / Google 登录；state 同时存进 cookie，回调时比对以防跨站伪造
+  app.get<{ Params: { provider: string }; Querystring: { hint?: string } }>('/api/oauth/:provider/start', async (req, reply) => {
+    const provider = req.params.provider;
+    if (!isOAuthProvider(provider)) return reply.code(404).send({ error: '未知的登录方式' });
+    if (!oauthEnabled(provider)) return reply.code(400).send({ error: `服务器未配置 ${oauthLabel(provider)} 登录` });
     const state = randomToken(16);
     reply.setCookie(OAUTH_COOKIE, state, {
       path: '/api/oauth',
@@ -214,22 +216,24 @@ export async function accountRoutes(app: FastifyInstance) {
       secure: config.publicUrl.startsWith('https://'),
       maxAge: 600,
     });
-    return reply.redirect(microsoftAuthUrl(state, req.query.hint));
+    return reply.redirect(oauthAuthUrl(provider, state, req.query.hint));
   });
 
-  app.get<{ Querystring: { code?: string; state?: string; error?: string; error_description?: string } }>(
-    '/api/oauth/microsoft/callback',
+  app.get<{ Params: { provider: string }; Querystring: { code?: string; state?: string; error?: string; error_description?: string } }>(
+    '/api/oauth/:provider/callback',
     async (req, reply) => {
+      const provider = req.params.provider;
       const done = (params: Record<string, string>) =>
-        reply.clearCookie(OAUTH_COOKIE, { path: '/api/oauth' }).redirect(`/settings?${new URLSearchParams(params)}`);
+        reply.clearCookie(OAUTH_COOKIE, { path: '/api/oauth' }).redirect(`/settings/mailboxes?${new URLSearchParams(params)}`);
+      if (!isOAuthProvider(provider)) return done({ oauth_error: '未知的登录方式' });
       const q = req.query;
-      if (q.error) return done({ oauth_error: q.error_description?.split('\n')[0] || q.error });
+      if (q.error) return done({ oauth_error: q.error_description?.split('\n')[0] || (q.error === 'access_denied' ? '你取消了授权' : q.error) });
       if (!q.code || !q.state || q.state !== req.cookies[OAUTH_COOKIE]) return done({ oauth_error: '授权已过期，请重试' });
       try {
-        const grant = await exchangeMicrosoftCode(q.code);
+        const grant = await exchangeOAuthCode(provider, q.code);
         const conn = {
           imap_host: grant.imapHost, imap_port: 993, imap_secure: 1,
-          smtp_host: grant.smtpHost, smtp_port: 587, smtp_secure: 0,
+          smtp_host: grant.smtpHost, smtp_port: grant.smtpPort, smtp_secure: +grant.smtpSecure,
           username: grant.email,
         };
         await testConnection({ ...conn, accessToken: grant.accessToken });
@@ -245,22 +249,23 @@ export async function accountRoutes(app: FastifyInstance) {
           return done({ oauth_error: `最多只能添加 ${max} 个邮箱，需要更多请联系管理员` });
         if (id) {
           forgetAccessToken(id);
-          await exec('UPDATE accounts SET oauth_refresh_enc = ?, smtp_host = ?, last_error = NULL WHERE id = ?', [
-            refresh, grant.smtpHost, id,
+          await exec('UPDATE accounts SET oauth_refresh_enc = ?, oauth_provider = ?, smtp_host = ?, last_error = NULL WHERE id = ?', [
+            refresh, provider, grant.smtpHost, id,
           ]);
         } else {
+          // Outlook 和 Gmail 发信后都会自己存一份到"已发送"，不需要我们再存（否则会出现两封）
           const res = await exec(
             `INSERT INTO accounts (user_id, name, email, from_name, color, imap_host, imap_port, imap_secure,
-               smtp_host, smtp_port, smtp_secure, username, auth_type, password_enc, oauth_refresh_enc, save_sent)
-             VALUES (?, ?, ?, ?, '#7db7f0', ?, ?, ?, ?, ?, ?, ?, 'oauth', '', ?, 0)`,
-            [req.user.id, 'Outlook', grant.email, grant.name, conn.imap_host, conn.imap_port, conn.imap_secure,
-             conn.smtp_host, conn.smtp_port, conn.smtp_secure, conn.username, refresh],
+               smtp_host, smtp_port, smtp_secure, username, auth_type, oauth_provider, password_enc, oauth_refresh_enc, save_sent)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'oauth', ?, '', ?, 0)`,
+            [req.user.id, provider === 'google' ? 'Gmail' : 'Outlook', grant.email, grant.name, provider === 'google' ? '#e55c60' : '#3985ee',
+             conn.imap_host, conn.imap_port, conn.imap_secure, conn.smtp_host, conn.smtp_port, conn.smtp_secure, conn.username, provider, refresh],
           );
           id = res.insertId;
         }
         await startAccount(id);
         emit(req.user.id, { type: 'accounts' });
-        return done({ oauth: 'ok' });
+        return done({ oauth: provider });
       } catch (e: any) {
         return done({ oauth_error: e.message });
       }

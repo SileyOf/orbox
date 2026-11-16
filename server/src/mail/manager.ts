@@ -30,6 +30,7 @@ export interface AccountRow {
   auth_type: 'password' | 'oauth';
   password_enc: string;
   oauth_refresh_enc: string | null;
+  oauth_provider: string | null;
   signature: string | null;
   notify: number;
   save_sent: number;
@@ -99,7 +100,11 @@ const ROLES: Record<string, string> = {
   '\\Trash': 'trash',
   '\\Junk': 'junk',
   '\\Archive': 'archive',
+  // Gmail 没有单独的归档文件夹，"归档"就是移到"所有邮件"
+  '\\All': 'archive',
 };
+/** Gmail 的这几个文件夹是其他文件夹的重复视图（所有邮件、已加星标、重要），同步它们只会把每封邮件存两遍 */
+const VIRTUAL = new Set(['\\All', '\\Flagged', '\\Important']);
 
 type NewMailHandler = (account: AccountRow, messageId: number) => Promise<void>;
 let onNewMail: NewMailHandler = async () => {};
@@ -394,7 +399,10 @@ class AccountWorker {
     await this.setState('syncing');
     try {
       const c = await this.client();
-      const listed = (await c.list()).filter((m) => !m.flags.has('\\Noselect'));
+      const all = (await c.list()).filter((m) => !m.flags.has('\\Noselect'));
+      // "所有邮件"保留为归档的目标文件夹，但不同步内容；星标和重要不需要出现
+      const listed = all.filter((m) => !m.specialUse || m.specialUse === '\\All' || !VIRTUAL.has(m.specialUse));
+      const skip = new Set(all.filter((m) => m.specialUse && VIRTUAL.has(m.specialUse)).map((m) => m.path));
       const known = new Map((await this.folders()).map((f) => [f.path, f]));
       for (const m of listed) {
         const role = m.path.toUpperCase() === 'INBOX' ? 'inbox' : (m.specialUse && ROLES[m.specialUse]) || null;
@@ -411,6 +419,7 @@ class AccountWorker {
       const folders = (await this.folders()).sort((a, b) => order.indexOf(a.role) - order.indexOf(b.role));
       for (const f of folders) {
         if (this.stopped) return;
+        if (skip.has(f.path)) continue;
         await this.syncFolder(f);
       }
       // 升级前就存在的邮件还没有线程，借每轮同步的尾巴慢慢补上

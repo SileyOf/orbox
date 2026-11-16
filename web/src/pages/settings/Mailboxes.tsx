@@ -17,7 +17,8 @@ export function MailboxesPage() {
 
   // Microsoft 授权完成后会带着结果跳回这里
   useEffect(() => {
-    if (params.get('oauth') === 'ok') toast('Outlook 邮箱已连接，正在同步');
+    const done = params.get('oauth');
+    if (done) toast(`${done === 'google' ? 'Gmail' : 'Outlook'} 邮箱已连接，正在同步`);
     else if (params.get('oauth_error')) toast(`授权失败：${params.get('oauth_error')}`, { kind: 'error', ms: 10_000 });
     else return;
     setParams({}, { replace: true });
@@ -34,7 +35,7 @@ export function MailboxesPage() {
                 <div style={{ minWidth: 0 }}>
                   <div className="truncate">{a.name} <span className="muted small">{a.email}</span></div>
                   <div className="small" style={{ color: a.sync_state === 'error' ? 'var(--danger)' : 'var(--muted)' }}>
-                    {a.sync_state === 'error' ? `连接失败：${a.last_error}` : a.sync_state === 'syncing' ? '同步中…' : `${a.auth_type === 'oauth' ? 'Microsoft 登录' : a.imap_host} · 已连接`}
+                    {a.sync_state === 'error' ? `连接失败：${a.last_error}` : a.sync_state === 'syncing' ? '同步中…' : `${a.auth_type === 'oauth' ? (a.oauth_provider === 'google' ? 'Google 登录' : 'Microsoft 登录') : a.imap_host} · 已连接`}
                     {a.ai_enabled ? ' · 允许 AI' : ''}
                   </div>
                 </div>
@@ -61,7 +62,7 @@ export function MailboxesPage() {
 
 const PRESETS: Record<string, { label: string; imap?: string; smtp?: string; hint: string }> = {
   mailcow: { label: 'mailcow / 自建', hint: 'IMAP 和 SMTP 一般都是你的邮件服务器主机名，例如 mail.example.com' },
-  gmail: { label: 'Gmail', imap: 'imap.gmail.com', smtp: 'smtp.gmail.com', hint: '需要在 Google 账号里开启两步验证并生成"应用专用密码"' },
+  gmail: { label: 'Gmail', imap: 'imap.gmail.com', smtp: 'smtp.gmail.com', hint: '用 Google 账号登录最方便；也可以在 Google 账号里开启两步验证后生成"应用专用密码"，填在下面' },
   qq: { label: 'QQ 邮箱', imap: 'imap.qq.com', smtp: 'smtp.qq.com', hint: '在 QQ 邮箱设置里开启 IMAP 服务并使用生成的授权码' },
   netease: { label: '163 邮箱', imap: 'imap.163.com', smtp: 'smtp.163.com', hint: '在邮箱设置里开启 IMAP 服务并使用授权码' },
   outlook: { label: 'Outlook', hint: 'Outlook / Hotmail / Microsoft 365 不支持密码登录，需要跳转到 Microsoft 授权' },
@@ -90,9 +91,12 @@ function AccountDialog({ account, onClose }: { account: Account | null; onClose:
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const providers = useQuery({ queryKey: ['oauth-providers'], queryFn: () => api<{ microsoft: boolean }>('/oauth/providers') });
+  const providers = useQuery({ queryKey: ['oauth-providers'], queryFn: () => api<{ microsoft: boolean; google: boolean }>('/oauth/providers') });
   const oauth = account ? account.auth_type === 'oauth' : preset === 'outlook';
-  const authorize = () => (location.href = `/api/oauth/microsoft/start${account ? `?hint=${encodeURIComponent(account.email)}` : ''}`);
+  /** 这个邮箱（或正在添加的类型）走哪家的授权 */
+  const provider: 'microsoft' | 'google' = account ? (account.oauth_provider === 'google' ? 'google' : 'microsoft') : preset === 'gmail' ? 'google' : 'microsoft';
+  const providerName = provider === 'google' ? 'Google' : 'Microsoft';
+  const authorize = () => (location.href = `/api/oauth/${provider}/start${account ? `?hint=${encodeURIComponent(account.email)}` : ''}`);
   const set = <K extends keyof typeof f>(k: K, v: (typeof f)[K]) => setF((prev) => ({ ...prev, [k]: v }));
 
   function choosePreset(key: string) {
@@ -144,7 +148,7 @@ function AccountDialog({ account, onClose }: { account: Account | null; onClose:
               使用 Microsoft 账号登录
             </button>
             {providers.data && !providers.data.microsoft && (
-              <div className="muted small">服务器还没有配置 MS_CLIENT_ID / MS_CLIENT_SECRET，配置方法见部署文档。</div>
+              <div className="muted small">{user.adminPath ? <>还没有配置 Microsoft 登录，请到 后台 → 集成 里配置。</> : '管理员还没有配置 Microsoft 登录。'}</div>
             )}
             <div className="dialog-foot">
               <button type="button" className="btn ghost" onClick={onClose}>取消</button>
@@ -156,9 +160,9 @@ function AccountDialog({ account, onClose }: { account: Account | null; onClose:
             <div className="setting" style={{ padding: 0, border: 0 }}>
               <div>
                 <div>{account.email}</div>
-                <div className="muted small">通过 Microsoft 登录。连接失败或提示授权失效时重新授权即可</div>
+                <div className="muted small">通过 {providerName} 登录。连接失败或提示授权失效时重新授权即可</div>
               </div>
-              <button type="button" className="btn sm" disabled={!providers.data?.microsoft} onClick={authorize}>重新授权</button>
+              <button type="button" className="btn sm" disabled={!providers.data?.[provider]} onClick={authorize}>重新授权</button>
             </div>
             <div className="grid2">
               <label className="field">
@@ -170,6 +174,14 @@ function AccountDialog({ account, onClose }: { account: Account | null; onClose:
                 <input className="input" value={f.from_name} onChange={(e) => set('from_name', e.target.value)} placeholder={user.name} />
               </label>
             </div>
+          </>
+        )}
+        {!oauth && !account && preset === 'gmail' && providers.data?.google && (
+          <>
+            <button type="button" className="btn primary" onClick={authorize}>
+              使用 Google 账号登录（推荐）
+            </button>
+            <div className="muted small" style={{ textAlign: 'center' }}>或者用应用专用密码：</div>
           </>
         )}
         {!oauth && (

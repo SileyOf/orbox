@@ -5,7 +5,7 @@
 # 然后打开网页，按安装向导填写数据库、站点名称和管理员账号。
 # 也可以把配置写在同目录的 .env 里（参考 .env.example），.env 优先于向导保存的配置。
 # 升级：docker compose -f docker-compose.hub.yml pull && docker compose -f docker-compose.hub.yml up -d
-# 想固定版本，把 latest 换成具体版本号，例如 0.6.0。
+# 想固定版本，把 latest 换成具体版本号，例如 0.7.0。
 services:
   orbox:
     image: yuki955/orbox:latest

@@ -13,7 +13,9 @@ import { exec, one, query } from '../db.js';
 import { logFile, recentLogs } from '../log.js';
 import { disconnect } from '../events.js';
 import { startAccount, stopAccount } from '../mail/manager.js';
-import { microsoftRedirectUri } from '../mail/oauth.js';
+import { oauthRedirectUri } from '../mail/oauth.js';
+import { mailerReady, sendSystemMail } from '../mailer.js';
+import type { Platform } from '../bots/types.js';
 import { integration, maskedIntegrations, permsSchema, publicSite, saveIntegration, saveSite, siteConfig, siteSchema } from '../site.js';
 import type { Integrations } from '../site.js';
 
@@ -28,7 +30,22 @@ const integrationFields: Record<keyof Integrations, z.ZodTypeAny> = {
   discord: z.object({ token: z.string().max(200) }).partial(),
   slack: z.object({ botToken: z.string().max(200), appToken: z.string().max(200) }).partial(),
   microsoft: z.object({ clientId: z.string().max(100), clientSecret: z.string().max(200) }).partial(),
+  google: z.object({ clientId: z.string().max(200), clientSecret: z.string().max(200) }).partial(),
+  mail: z
+    .object({
+      mode: z.enum(['off', 'account', 'smtp']),
+      accountId: z.string().regex(/^\d*$/),
+      host: z.string().trim().max(190),
+      port: z.string().regex(/^\d{0,5}$/),
+      secure: z.enum(['ssl', 'starttls', 'none']),
+      user: z.string().trim().max(190),
+      pass: z.string().max(500),
+      from: z.string().trim().max(190).refine((v) => v === '' || /^[^\s@]+@[^\s@]+$/.test(v), '发件地址格式不正确'),
+      fromName: z.string().trim().max(60),
+    })
+    .partial(),
 };
+const BOT_PLATFORMS = new Set(['telegram', 'feishu', 'discord', 'slack']);
 
 /** 在 Slack 里"从清单创建应用"用的清单：Socket Mode、权限、事件、交互一次配好 */
 function slackManifest() {
@@ -102,7 +119,9 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/api/admin/site', async (req, reply) => {
     try {
-      return await saveSite(siteSchema.partial().parse(req.body));
+      const patch = siteSchema.partial().parse(req.body);
+      if (patch.emailVerification === 'required' && !mailerReady()) return reply.code(400).send({ error: '请先在 集成 → 系统邮件 里配置发信，才能要求验证邮箱' });
+      return await saveSite(patch);
     } catch (e: any) {
       return reply.code(400).send({ error: e.issues?.[0]?.message || e.message });
     }
@@ -121,7 +140,9 @@ export async function adminRoutes(app: FastifyInstance) {
     values: maskedIntegrations(),
     status: botStatus(),
     discordInvite: discordInviteUrl(),
-    microsoftRedirect: microsoftRedirectUri(),
+    microsoftRedirect: oauthRedirectUri('microsoft'),
+    googleRedirect: oauthRedirectUri('google'),
+    mailReady: mailerReady(),
     slackManifest: slackManifest(),
   }));
 
@@ -129,16 +150,32 @@ export async function adminRoutes(app: FastifyInstance) {
     const platform = req.params.platform as keyof Integrations;
     const schema = integrationFields[platform];
     if (!schema) return reply.code(404).send({ error: '未知平台' });
-    await saveIntegration(platform, schema.parse(req.body) as never);
-    if (platform !== 'microsoft') {
+    const patch = schema.parse(req.body) as Record<string, string>;
+    if (platform === 'mail' && patch.mode === 'account') {
+      // 只能用自己（管理员）名下的邮箱代发系统邮件
+      if (!(await one('SELECT id FROM accounts WHERE id = ? AND user_id = ?', [Number(patch.accountId), req.user.id]))) return reply.code(400).send({ error: '请选择一个你自己的邮箱' });
+    }
+    await saveIntegration(platform, patch as never);
+    if (platform === 'mail' && !mailerReady() && siteConfig().emailVerification === 'required') await saveSite({ emailVerification: 'off' });
+    if (BOT_PLATFORMS.has(platform)) {
       // 新凭据立即生效：重启这个平台的机器人，并把连接结果返回给前端
       try {
-        await restartBot(platform);
+        await restartBot(platform as Platform);
       } catch (e: any) {
         return reply.code(400).send({ error: `已保存，但连接失败：${e.message}` });
       }
     }
-    return { ok: true, status: botStatus(), discordInvite: discordInviteUrl() };
+    return { ok: true, status: botStatus(), discordInvite: discordInviteUrl(), mailReady: mailerReady() };
+  });
+
+  /** 给自己发一封测试邮件，确认系统发信能用 */
+  app.post('/api/admin/mail/test', async (req) => {
+    await sendSystemMail(
+      req.user.email,
+      `【${siteConfig().name}】测试邮件`,
+      `看到这封邮件说明系统发信已经配置好了。\n\n之后用户可以通过邮件验证邮箱、找回密码、接收登录验证码。\n\n—— ${siteConfig().name}`,
+    );
+    return { ok: true, to: req.user.email };
   });
 
   app.post('/api/admin/feishu/register', async (req) => {
@@ -190,6 +227,7 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/api/admin/users', async () => {
     const rows = await query<any>(
       `SELECT u.id, u.email, u.name, u.is_admin, u.disabled, u.perms, u.created_at, u.last_login_at,
+              u.email_verified_at IS NOT NULL AS verified, u.verify_pending, (u.totp_enabled OR u.email_otp) AS two_factor,
               GREATEST(COALESCE(u.last_seen_at, u.last_login_at), COALESCE(u.last_login_at, u.last_seen_at)) AS last_seen_at,
               (SELECT COUNT(*) FROM accounts a WHERE a.user_id = u.id) AS accounts,
               (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id AND s.expires_at > UTC_TIMESTAMP()) AS sessions,
@@ -211,6 +249,10 @@ export async function adminRoutes(app: FastifyInstance) {
         email: z.string().trim().toLowerCase().email('邮箱格式不正确'),
         /** null 表示恢复为站点默认权限 */
         perms: permsSchema.nullable(),
+        /** 手动标记邮箱已验证 / 未验证 */
+        verified: z.boolean(),
+        /** 关闭这个用户的两步验证（他手机丢了、恢复码也没了的时候） */
+        reset2fa: z.literal(true),
       })
       .partial()
       .parse(req.body);
@@ -231,14 +273,21 @@ export async function adminRoutes(app: FastifyInstance) {
       }
     }
     if (body.name) await exec('UPDATE users SET name = ? WHERE id = ?', [body.name, id]);
-    if (body.email) await exec('UPDATE users SET email = ? WHERE id = ?', [body.email, id]);
+    // 管理员改了登录邮箱：新邮箱还没验证过（MySQL 按从左到右的顺序赋值，所以先处理验证状态）
+    if (body.email) await exec('UPDATE users SET email_verified_at = IF(email = ?, email_verified_at, NULL), email = ? WHERE id = ?', [body.email, body.email, id]);
     if (body.perms !== undefined) await exec('UPDATE users SET perms = ? WHERE id = ?', [body.perms ? JSON.stringify(body.perms) : null, id]);
+    if (body.verified !== undefined)
+      await exec('UPDATE users SET email_verified_at = IF(?, COALESCE(email_verified_at, UTC_TIMESTAMP()), NULL), verify_pending = 0 WHERE id = ?', [+body.verified, id]);
+    if (body.reset2fa) {
+      await exec('UPDATE users SET totp_enabled = 0, totp_secret_enc = NULL, email_otp = 0, recovery_codes = NULL WHERE id = ?', [id]);
+      console.log(`[admin] ${req.user.email} 关闭了用户 ${id} 的两步验证`);
+    }
     return { ok: true };
   });
 
   /** 让这个用户所有已登录的设备下线 */
   app.post<{ Params: { id: string } }>('/api/admin/users/:id/logout', async (req, reply) => {
-    if (Number(req.params.id) === req.user.id) return reply.code(400).send({ error: '要退出自己的其他设备，请在 设置 → 账户 里点"退出其他设备"' });
+    if (Number(req.params.id) === req.user.id) return reply.code(400).send({ error: '要退出自己的其他设备，请在 设置 → 安全 里点"退出其他设备"' });
     const res = await exec('DELETE FROM sessions WHERE user_id = ?', [req.params.id]);
     disconnect(Number(req.params.id));
     return { ok: true, count: res.affectedRows };

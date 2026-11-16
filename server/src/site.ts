@@ -21,6 +21,8 @@ export const siteSchema = z.object({
   defaultTimezone: z.string().min(1).max(64),
   /** 允许普通用户使用管理员配置的共享模型 */
   shareAi: z.boolean(),
+  /** 注册时是否必须先验证邮箱（需要配置系统发信） */
+  emailVerification: z.enum(['off', 'required']),
   /** 新用户（以及没单独设置过权限的用户）的默认权限 */
   defaultPerms: z.lazy(() => permsSchema),
 });
@@ -59,6 +61,7 @@ const defaults = (): SiteConfig => ({
   registration: config.allowRegistration ? 'open' : 'closed',
   defaultTimezone: 'Asia/Shanghai',
   shareAi: config.ai.shared,
+  emailVerification: 'off',
   defaultPerms: DEFAULT_PERMS,
 });
 
@@ -68,10 +71,16 @@ export interface Integrations {
   discord: { token: string };
   slack: { botToken: string; appToken: string };
   microsoft: { clientId: string; clientSecret: string };
+  google: { clientId: string; clientSecret: string };
+  /**
+   * 系统发信（验证码、找回密码）。mode：off 不发信；account 用管理员的某个邮箱发；smtp 用单独填写的 SMTP。
+   * secure：ssl（465）/ starttls（587）/ none。
+   */
+  mail: { mode: 'off' | 'account' | 'smtp'; accountId: string; host: string; port: string; secure: 'ssl' | 'starttls' | 'none'; user: string; pass: string; from: string; fromName: string };
 }
 
 /** 这些字段是密钥：加密存储，返回给前端时只给掩码 */
-const SECRET = new Set(['token', 'appSecret', 'botToken', 'appToken', 'clientSecret']);
+const SECRET = new Set(['token', 'appSecret', 'botToken', 'appToken', 'clientSecret', 'pass']);
 
 const envIntegrations = (): Integrations => ({
   telegram: { token: config.telegramToken, proxy: config.telegramProxy },
@@ -79,6 +88,8 @@ const envIntegrations = (): Integrations => ({
   discord: { token: config.discordToken },
   slack: { ...config.slack },
   microsoft: { ...config.microsoft },
+  google: { ...config.google },
+  mail: { mode: 'off', accountId: '', host: '', port: '465', secure: 'ssl', user: '', pass: '', from: '', fromName: '' },
 });
 
 let site: SiteConfig = defaults();

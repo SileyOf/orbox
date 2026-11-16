@@ -20,6 +20,7 @@ import { startBots, stopBots } from './bots/hub.js';
 import { accountRoutes } from './routes/accounts.js';
 import { mailRoutes } from './routes/mail.js';
 import { noteRoutes } from './routes/notes.js';
+import { securityRoutes } from './routes/security.js';
 import { taskRoutes } from './routes/tasks.js';
 import { aiRoutes } from './routes/ai.js';
 import { mcpRoutes } from './routes/mcp.js';
@@ -85,6 +86,7 @@ app.addHook('onRequest', async (req, reply) => {
 await app.register(cookie);
 await app.register(multipart, { limits: { fileSize: 25 * 1024 * 1024, files: 20 } });
 await app.register(authRoutes);
+await app.register(securityRoutes);
 await app.register(accountRoutes);
 await app.register(mailRoutes);
 await app.register(taskRoutes);

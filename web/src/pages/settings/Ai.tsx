@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Pencil, Plus, RefreshCw, Trash2, Zap } from 'lucide-react';
+import { BarChart3, Pencil, Plus, RefreshCw, Server, Trash2, Workflow, Zap } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link } from 'react-router-dom';
@@ -7,6 +7,7 @@ import { useAccounts, useSaveSettings, useUser } from '../../App';
 import { api } from '../../api';
 import type { AiInfo, AiProvider, AiTaskName, AiTaskSetting } from '../../api';
 import { toast, toastError } from '../../lib';
+import { ConnectModule } from './Connect';
 import { Section, Setting, Switch } from './ui';
 
 export const PROVIDER_PRESETS: { label: string; kind: 'anthropic' | 'openai'; baseUrl: string; model: string }[] = [
@@ -152,6 +153,22 @@ export function AiPage() {
   const meta = info.data?.meta;
   const aiAccounts = accounts.filter((a) => a.ai_enabled);
 
+  const [detail, setDetail] = useState(false);
+
+  /** 一次改多项任务（按"快速 / 主力"两档整体设置时用） */
+  async function updateTasks(names: AiTaskName[], patch: Partial<AiTaskSetting>) {
+    if (!tasks) return;
+    const next = { ...tasks };
+    for (const n of names) next[n] = { ...tasks[n], ...patch };
+    setTasks(next);
+    try {
+      await api('/ai/tasks', { method: 'PUT', body: { tasks: next } });
+      qc.invalidateQueries({ queryKey: ['ai'] });
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
   async function updateTask(name: AiTaskName, patch: Partial<AiTaskSetting>) {
     if (!tasks) return;
     const next = { ...tasks, [name]: { ...tasks[name], ...patch } };
@@ -167,6 +184,10 @@ export function AiPage() {
   return (
     <>
       <Section
+        id="ai-providers"
+        icon={Server}
+        defaultOpen
+        summary={providers.length ? providers.map((p) => p.name).join('、') : '还没有模型服务'}
         title="模型服务"
         hint="可以同时接入多个服务：便宜的模型做高频小任务，强的模型做理解和写作。邮件内容会发给对应的服务商。"
         action={user.perms.ownAi ? <button className="btn sm" onClick={() => setEditing('new')}><Plus size={15} /> 添加</button> : <span className="muted small">管理员没有开放自己添加模型服务</span>}
@@ -199,7 +220,58 @@ export function AiPage() {
       </Section>
 
       {tasks && meta && (
-        <Section title="任务分配" hint="每项任务都可以单独选择模型或关闭。标为「快速」的是每封新邮件都会触发的小任务，建议用便宜快速的模型；关闭时使用本地规则。">
+        <Section
+          id="ai-tasks"
+          icon={Workflow}
+          defaultOpen
+          title="用哪个模型"
+          summary={`${(Object.keys(meta) as AiTaskName[]).filter((n) => tasks[n].enabled).length} / ${Object.keys(meta).length} 项功能开启`}
+          hint="分两档设置就够了：主力模型负责理解和写作，快速模型负责每封新邮件都会触发的小任务（关闭时用本地规则，不花钱）。"
+        >
+          <div className="card">
+            {(['strong', 'fast'] as const).map((tier) => {
+              const names = (Object.keys(meta) as AiTaskName[]).filter((n) => meta[n].tier === tier);
+              const first = tasks[names[0]];
+              const same = names.every((n) => tasks[n].providerId === first.providerId && tasks[n].model === first.model);
+              const on = names.filter((n) => tasks[n].enabled).length;
+              const provider = providers.find((p) => p.id === first.providerId);
+              return (
+                <div className="task-route" key={tier}>
+                  <div className="grow" style={{ minWidth: 0 }}>
+                    <div>{tier === 'strong' ? '主力模型' : '快速模型'}</div>
+                    <div className="muted small">
+                      {names.map((n) => meta[n].label).join('、')}
+                      {!same && ' · 各项设置不同，见逐项设置'}
+                    </div>
+                  </div>
+                  <select className="select" style={{ width: 150 }} value={same ? (first.providerId ?? '') : ''} disabled={!providers.length} onChange={(e) => e.target.value && updateTasks(names, { providerId: Number(e.target.value), model: '' })}>
+                    {(!providers.length || !same) && <option value="">{providers.length ? '（不同）' : '没有服务'}</option>}
+                    {providers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                  <input
+                    className="input"
+                    style={{ width: 170 }}
+                    list={`models-tier-${tier}`}
+                    placeholder={same ? (provider ? `默认 ${provider.defaultModel}` : '模型') : '（不同）'}
+                    defaultValue={same ? first.model : ''}
+                    key={`${tier}-${same}-${first.providerId}-${first.model}`}
+                    onBlur={(e) => (same ? e.target.value.trim() !== first.model : e.target.value.trim()) && updateTasks(names, { model: e.target.value.trim() })}
+                  />
+                  <datalist id={`models-tier-${tier}`}>{(provider?.models || []).map((x) => <option key={x} value={x} />)}</datalist>
+                  <Switch checked={on > 0} disabled={!providers.length} onChange={(v) => updateTasks(names, { enabled: v })} />
+                </div>
+              );
+            })}
+            <Setting title="翻译成" hint="邮件里的翻译按钮和机器人里的翻译都用这个语言">
+              <select className="select" value={user.settings.translateTo} onChange={(e) => save({ settings: { translateTo: e.target.value } }).catch(toastError)}>
+                {['简体中文', '繁體中文', 'English', '日本語', '한국어', 'Français', 'Deutsch', 'Español', 'Русский'].map((l) => <option key={l}>{l}</option>)}
+              </select>
+            </Setting>
+          </div>
+          <button className="btn ghost sm" style={{ justifySelf: 'start' }} onClick={() => setDetail(!detail)}>
+            {detail ? '收起逐项设置' : '逐项设置（每项功能单独选模型或关闭）'}
+          </button>
+          {detail && (
           <div className="card">
             {(Object.keys(meta) as AiTaskName[]).map((name) => {
               const m = meta[name];
@@ -236,20 +308,18 @@ export function AiPage() {
               );
             })}
           </div>
+          )}
         </Section>
       )}
 
-      <Section title="翻译">
-        <div className="card">
-          <Setting title="翻译成" hint="邮件里的翻译按钮和机器人里的翻译都用这个语言">
-            <select className="select" value={user.settings.translateTo} onChange={(e) => save({ settings: { translateTo: e.target.value } }).catch(toastError)}>
-              {['简体中文', '繁體中文', 'English', '日本語', '한국어', 'Français', 'Deutsch', 'Español', 'Русский'].map((l) => <option key={l}>{l}</option>)}
-            </select>
-          </Setting>
-        </div>
-      </Section>
+      <ConnectModule />
 
-      <Section title="最近 30 天用量">
+      <Section
+        id="ai-usage"
+        icon={BarChart3}
+        title="最近 30 天用量"
+        summary={usage.data?.length ? `${usage.data.reduce((n, u) => n + Number(u.calls), 0)} 次调用` : '还没有调用记录'}
+      >
         <div className="card">
           {(usage.data || []).map((u) => (
             <Setting

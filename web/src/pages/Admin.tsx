@@ -1,10 +1,10 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Bot, Copy, Download, ExternalLink, Gauge, ImageUp, KeyRound, LogOut, Palette, Pencil, Plus, QrCode, RefreshCw, ScrollText, Trash2, Users } from 'lucide-react';
+import { ArrowLeft, Bot, Copy, Download, ExternalLink, Gauge, Hash, ImageUp, KeyRound, LogOut, Mail, MessageCircle, MessagesSquare, Palette, Pencil, Plus, QrCode, RefreshCw, ScrollText, Send, ShieldOff, Trash2, Users } from 'lucide-react';
 import QRCode from 'qrcode';
 import { useEffect, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { NavLink, useNavigate, useParams } from 'react-router-dom';
-import { useUser } from '../App';
+import { useAccounts, useUser } from '../App';
 import { api } from '../api';
 import type { AiProvider } from '../api';
 import { ACCENTS, copyText, toast, toastError } from '../lib';
@@ -151,6 +151,7 @@ interface SiteConfig {
   theme: 'system' | 'light' | 'dark';
   adminPath: string;
   registration: 'open' | 'invite' | 'closed';
+  emailVerification: 'off' | 'required';
   defaultTimezone: string;
   shareAi: boolean;
   defaultPerms: Perms;
@@ -312,6 +313,9 @@ interface AdminUser {
   tokens: number;
   custom: boolean;
   perms: Perms;
+  verified: number;
+  verify_pending: number;
+  two_factor: number;
 }
 
 const ago = (iso: string) => {
@@ -347,7 +351,7 @@ function UserDialog({ user, defaults, self, onClose, onChanged }: { user: AdminU
     if (!confirm(`为 ${user.email} 生成一个临时密码？他所有已登录的设备会下线。`)) return;
     try {
       const r = await api<{ password: string }>(`/admin/users/${user.id}/reset-password`, { method: 'POST' });
-      prompt('临时密码（请转交给用户，登录后在 设置 → 账户 修改）', r.password);
+      prompt('临时密码（请转交给用户，登录后在 设置 → 安全 修改）', r.password);
       onChanged();
     } catch (err) {
       toastError(err);
@@ -396,7 +400,7 @@ function UserDialog({ user, defaults, self, onClose, onChanged }: { user: AdminU
           </div>
         )}
         <div className="muted small">
-          {user.sessions} 个设备登录中 · {user.accounts} 个邮箱 · {user.bots} 个机器人绑定 · {user.tokens} 个 MCP 令牌
+          {user.sessions} 个设备登录中 · {user.accounts} 个邮箱 · {user.bots} 个机器人绑定 · {user.tokens} 个 MCP 令牌 · 邮箱{user.verified ? '已验证' : '未验证'} · 两步验证{user.two_factor ? '已开启' : '未开启'}
         </div>
         <div className="dialog-foot" style={{ flexWrap: 'wrap' }}>
           {!self && (
@@ -407,6 +411,34 @@ function UserDialog({ user, defaults, self, onClose, onChanged }: { user: AdminU
               <button type="button" className="btn ghost sm" onClick={logout} disabled={!user.sessions}>
                 <LogOut size={14} /> 退出所有设备
               </button>
+              {!!user.two_factor && (
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  title="用户手机丢了、恢复码也没了的时候用"
+                  onClick={() =>
+                    confirm(`关闭 ${user.email} 的两步验证？之后他只用密码就能登录，请确认是本人提出的要求。`) &&
+                    api(`/admin/users/${user.id}`, { method: 'PATCH', body: { reset2fa: true } })
+                      .then(() => (toast('已关闭他的两步验证'), onChanged(), onClose()))
+                      .catch(toastError)
+                  }
+                >
+                  <ShieldOff size={14} /> 关闭两步验证
+                </button>
+              )}
+              {!user.verified && (
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  onClick={() =>
+                    api(`/admin/users/${user.id}`, { method: 'PATCH', body: { verified: true } })
+                      .then(() => (toast('已标记为已验证'), onChanged(), onClose()))
+                      .catch(toastError)
+                  }
+                >
+                  标记邮箱已验证
+                </button>
+              )}
               <button type="button" className="btn ghost sm danger" onClick={remove}>
                 <Trash2 size={14} /> 删除
               </button>
@@ -456,6 +488,11 @@ function UsersPage() {
               ))}
             </div>
           </Setting>
+          {site.data?.registration !== 'closed' && (
+            <Setting title="注册时必须验证邮箱" hint="注册后要输入发到邮箱的验证码才能登录，防止用别人的或不存在的邮箱注册。需要先在 集成 → 系统邮件 里配置发信">
+              <Switch checked={site.data?.emailVerification === 'required'} onChange={(v) => setSite({ emailVerification: v ? 'required' : 'off' })} />
+            </Setting>
+          )}
         </div>
       </Section>
       {site.data?.registration === 'invite' && (
@@ -503,7 +540,8 @@ function UsersPage() {
                 title={
                   <>
                     {u.name} <span className="muted small">{u.email}</span> {u.is_admin ? <span className="chip accent" style={{ height: 20 }}>管理员</span> : null}{' '}
-                    {u.disabled ? <span className="chip danger" style={{ height: 20 }}>已停用</span> : null} {limits && <span className="chip" style={{ height: 20 }}>{limits}</span>}
+                    {u.disabled ? <span className="chip danger" style={{ height: 20 }}>已停用</span> : null} {limits && <span className="chip" style={{ height: 20 }}>{limits}</span>}{' '}
+                    {u.two_factor ? <span className="chip" style={{ height: 20 }}>两步验证</span> : null} {u.verify_pending ? <span className="chip danger" style={{ height: 20 }}>待验证邮箱</span> : null}
                   </>
                 }
                 hint={`${u.accounts} 个邮箱 · 注册于 ${new Date(u.created_at).toLocaleDateString()} · ${seen ? `最近活跃 ${ago(seen)}` : '还没有登录过'}${u.sessions ? ` · ${u.sessions} 个设备在线` : ''}`}
@@ -539,11 +577,122 @@ interface IntegrationsData {
     discord: { token: string };
     slack: { botToken: string; appToken: string };
     microsoft: { clientId: string; clientSecret: string };
+    google: { clientId: string; clientSecret: string };
+    mail: MailConfig;
   };
   status: BotState[];
   discordInvite: string | null;
   microsoftRedirect: string;
+  googleRedirect: string;
+  mailReady: boolean;
   slackManifest: object;
+}
+
+interface MailConfig {
+  mode: 'off' | 'account' | 'smtp';
+  accountId: string;
+  host: string;
+  port: string;
+  secure: 'ssl' | 'starttls' | 'none';
+  user: string;
+  pass: string;
+  from: string;
+  fromName: string;
+}
+
+/** 系统发信：验证邮箱、找回密码、登录验证码都靠它。可以直接借用管理员自己的一个邮箱，或者单独填 SMTP */
+function MailSettings({ value, ready, onSaved }: { value: MailConfig; ready: boolean; onSaved: () => void }) {
+  const me = useUser();
+  const { data: accounts = [] } = useAccounts();
+  const [f, setF] = useState<MailConfig>({ ...value, pass: '' });
+  const [busy, setBusy] = useState(false);
+  const set = (patch: Partial<MailConfig>) => setF({ ...f, ...patch });
+
+  async function save(test: boolean) {
+    setBusy(true);
+    try {
+      // 密码留空表示不修改
+      const { pass, ...rest } = f;
+      await api('/admin/integrations/mail', { method: 'PUT', body: { ...rest, ...(pass ? { pass } : {}) } });
+      if (test && f.mode !== 'off') {
+        const r = await api<{ to: string }>('/admin/mail/test', { method: 'POST' });
+        toast(`已保存，测试邮件已发到 ${r.to}，请查收`);
+      } else toast('已保存');
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setBusy(false);
+      onSaved();
+    }
+  }
+
+  return (
+    <div className="card" style={{ padding: 18, display: 'grid', gap: 12 }}>
+      <div className="tabs" style={{ justifySelf: 'start' }}>
+        {(['off', 'account', 'smtp'] as const).map((m) => (
+          <button key={m} className={f.mode === m ? 'active' : ''} onClick={() => set({ mode: m })}>
+            {{ off: '不发信', account: '用我的邮箱发', smtp: '单独的 SMTP' }[m]}
+          </button>
+        ))}
+      </div>
+      {f.mode === 'off' && <div className="muted small">关闭时用户不能验证邮箱、不能用邮件找回密码，也不能用邮箱验证码做两步验证（动态码 App 不受影响）。</div>}
+      {f.mode === 'account' && (
+        <label className="field">
+          <span>用哪个邮箱发（你在 设置 → 邮箱 里添加的）</span>
+          <select className="select" value={f.accountId} onChange={(e) => set({ accountId: e.target.value })}>
+            <option value="">请选择</option>
+            {accounts.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name} &lt;{a.email}&gt;
+              </option>
+            ))}
+          </select>
+          <span className="setup-hint">最省事：不用另外找发信服务。验证码邮件会从这个地址发出，并出现在它的"已发送"里。</span>
+        </label>
+      )}
+      {f.mode === 'smtp' && (
+        <div className="grid2">
+          <label className="field">
+            <span>SMTP 服务器</span>
+            <input className="input" value={f.host} onChange={(e) => set({ host: e.target.value })} placeholder="smtp.example.com" />
+          </label>
+          <label className="field">
+            <span>端口和加密</span>
+            <div className="row" style={{ gap: 6 }}>
+              <input className="input" style={{ width: 80 }} inputMode="numeric" value={f.port} onChange={(e) => set({ port: e.target.value.replace(/\D/g, '') })} />
+              <select className="select grow" value={f.secure} onChange={(e) => set({ secure: e.target.value as MailConfig['secure'], port: e.target.value === 'ssl' ? '465' : e.target.value === 'starttls' ? '587' : f.port })}>
+                <option value="ssl">SSL / TLS（465）</option>
+                <option value="starttls">STARTTLS（587）</option>
+                <option value="none">不加密</option>
+              </select>
+            </div>
+          </label>
+          <label className="field">
+            <span>用户名</span>
+            <input className="input" autoComplete="off" value={f.user} onChange={(e) => set({ user: e.target.value })} />
+          </label>
+          <label className="field">
+            <span>密码</span>
+            <input className="input" type="password" autoComplete="new-password" value={f.pass} onChange={(e) => set({ pass: e.target.value })} placeholder={value.pass ? `已保存 ${value.pass}，留空不修改` : ''} />
+          </label>
+          <label className="field">
+            <span>发件地址</span>
+            <input className="input" type="email" value={f.from} onChange={(e) => set({ from: e.target.value })} placeholder="noreply@example.com" />
+          </label>
+          <label className="field">
+            <span>发件人名称（可选）</span>
+            <input className="input" maxLength={60} value={f.fromName} onChange={(e) => set({ fromName: e.target.value })} placeholder="默认用站点名称" />
+          </label>
+        </div>
+      )}
+      <div className="row">
+        <button className="btn primary sm" disabled={busy} onClick={() => save(true)}>
+          {busy ? '正在保存…' : f.mode === 'off' ? '保存' : '保存并发测试邮件'}
+        </button>
+        {f.mode !== 'off' && <span className="muted small">测试邮件会发到你的登录邮箱 {me.email}{ready ? '' : '（当前配置还不完整）'}</span>}
+      </div>
+    </div>
+  );
 }
 
 function Steps({ children }: { children: ReactNode }) {
@@ -658,7 +807,18 @@ function Integrations() {
 
   return (
     <>
-      <Section title="Telegram" hint={status('telegram')}>
+      <Section
+        id="int-mail"
+        icon={Mail}
+        defaultOpen={!d.mailReady}
+        title="系统邮件"
+        summary={d.mailReady ? `✅ 已配置 · ${v.mail.mode === 'account' ? '用管理员的邮箱发信' : v.mail.from}` : '未配置：用户不能验证邮箱、用邮件找回密码'}
+        hint="用来给用户的登录邮箱发验证码：验证邮箱、找回密码、登录时的邮箱验证码。"
+      >
+        <MailSettings value={v.mail} ready={d.mailReady} onSaved={refetch} />
+      </Section>
+
+      <Section id="int-telegram" icon={Send} title="Telegram" summary={status('telegram')} hint={status('telegram')}>
         <div className="card" style={{ padding: 18, display: 'grid', gap: 12 }}>
           <Steps>
             <li>在 Telegram 里打开 <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">@BotFather</a>，发送 <code>/newbot</code>，按提示起名。</li>
@@ -675,7 +835,7 @@ function Integrations() {
         </div>
       </Section>
 
-      <Section title="飞书 / Lark" hint={status('feishu')}>
+      <Section id="int-feishu" icon={MessagesSquare} title="飞书 / Lark" summary={status('feishu')} hint={status('feishu')}>
         <div className="card" style={{ padding: 18, display: 'grid', gap: 12 }}>
           <div className="row" style={{ flexWrap: 'wrap' }}>
             <FeishuQr lark={false} onDone={refetch} />
@@ -709,7 +869,7 @@ function Integrations() {
         </div>
       </Section>
 
-      <Section title="Discord" hint={status('discord')}>
+      <Section id="int-discord" icon={MessageCircle} title="Discord" summary={status('discord')} hint={status('discord')}>
         <div className="card" style={{ padding: 18, display: 'grid', gap: 12 }}>
           <Steps>
             <li>打开 <a href="https://discord.com/developers/applications" target="_blank" rel="noopener noreferrer">Discord Developer Portal <ExternalLink size={12} /></a> → New Application → Bot → Reset Token，把 Token 填到下面。</li>
@@ -725,7 +885,7 @@ function Integrations() {
         </div>
       </Section>
 
-      <Section title="Slack" hint={status('slack')}>
+      <Section id="int-slack" icon={Hash} title="Slack" summary={status('slack')} hint={status('slack')}>
         <div className="card" style={{ padding: 18, display: 'grid', gap: 12 }}>
           <Steps>
             <li>
@@ -746,7 +906,7 @@ function Integrations() {
         </div>
       </Section>
 
-      <Section title="Outlook 登录（Microsoft）" hint={v.microsoft.clientId ? '✅ 已配置' : '未配置：用户无法添加 Outlook / Microsoft 365 邮箱'}>
+      <Section id="int-microsoft" icon={KeyRound} title="Outlook 登录（Microsoft）" summary={v.microsoft.clientId ? '✅ 已配置' : '未配置：用户无法添加 Outlook / Microsoft 365 邮箱'}>
         <div className="card" style={{ padding: 18, display: 'grid', gap: 12 }}>
           <Steps>
             <li>打开 <a href="https://entra.microsoft.com" target="_blank" rel="noopener noreferrer">Microsoft Entra <ExternalLink size={12} /></a> → 应用注册 → 新注册，账户类型选"任何组织目录中的帐户和个人 Microsoft 帐户"。</li>
@@ -762,6 +922,28 @@ function Integrations() {
             fields={[
               { key: 'clientId', label: '应用程序（客户端）ID', value: v.microsoft.clientId },
               { key: 'clientSecret', label: '客户端密码的值', secret: true, value: v.microsoft.clientSecret },
+            ]}
+          />
+        </div>
+      </Section>
+
+      <Section id="int-google" icon={KeyRound} title="Gmail 登录（Google）" summary={v.google.clientId ? '✅ 已配置' : '未配置：用户只能用"应用专用密码"添加 Gmail'}>
+        <div className="card" style={{ padding: 18, display: 'grid', gap: 12 }}>
+          <Steps>
+            <li>打开 <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud Console <ExternalLink size={12} /></a>，新建一个项目，在"API 和服务 → 库"里启用 <b>Gmail API</b>。</li>
+            <li>"OAuth 权限请求页面"：用户类型选"外部"，添加范围 <code>https://mail.google.com/</code>，并把要使用的 Gmail 地址加到"测试用户"里。</li>
+            <li>
+              "凭据 → 创建凭据 → OAuth 客户端 ID"，类型选"Web 应用"，已获授权的重定向 URI 填 <code>{d.googleRedirect}</code>
+              <button className="btn ghost sm" onClick={() => copyText(d.googleRedirect)}><Copy size={14} /></button>
+            </li>
+            <li>把客户端 ID 和密钥填到下面。应用处于"测试"状态时，授权 7 天后会过期需要重新授权；自己长期使用可以在权限请求页面点"发布应用"（不提交审核也能用，授权时会多一个"未经验证"的提示）。</li>
+          </Steps>
+          <CredentialForm
+            platform="google"
+            onSaved={refetch}
+            fields={[
+              { key: 'clientId', label: '客户端 ID', value: v.google.clientId, placeholder: 'xxxx.apps.googleusercontent.com' },
+              { key: 'clientSecret', label: '客户端密钥', secret: true, value: v.google.clientSecret },
             ]}
           />
         </div>

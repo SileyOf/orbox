@@ -1,11 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
-import { Copy, KeyRound, Trash2, X } from 'lucide-react';
+import { Copy, KeyRound, PlugZap, Trash2, X } from 'lucide-react';
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { useUser } from '../../App';
 import { api } from '../../api';
 import { copyText, toastError } from '../../lib';
-import { Setting as Row } from './ui';
+import { Section, Setting as Row } from './ui';
 
 interface TokenRow {
   id: number;
@@ -15,16 +15,10 @@ interface TokenRow {
   created_at: string;
 }
 
-export function ConnectPage() {
+/** 设置 → AI 里的一个模块：给外部 AI 工具用的 MCP 访问令牌 */
+export function ConnectModule() {
   const user = useUser();
-  if (!user.perms.mcp)
-    return (
-      <section className="section">
-        <h2>AI 连接（MCP）</h2>
-        <div className="card empty-hint">管理员没有给你开放 MCP 外部连接。</div>
-      </section>
-    );
-  return <ConnectInner />;
+  return user.perms.mcp ? <ConnectInner /> : null;
 }
 
 function ConnectInner() {
@@ -50,12 +44,13 @@ function ConnectInner() {
     : '';
 
   return (
-    <section className="section">
-      <h2>AI 连接（MCP）</h2>
-      <div className="muted small">
-        让 Hermes、Claude Desktop、Cursor 等支持 MCP 的 AI 工具直接查邮件、读邮件、管理计划、起草邮件。
-        它们只能访问开启了"允许 AI 读取"的邮箱。
-      </div>
+    <Section
+      id="ai-mcp"
+      icon={PlugZap}
+      title="外部 AI 连接（MCP）"
+      summary={tokens.data?.length ? `${tokens.data.length} 个令牌` : '让 Claude Desktop、Cursor、Hermes 等使用 Orbox'}
+      hint={'让 Hermes、Claude Desktop、Cursor 等支持 MCP 的 AI 工具直接查邮件、读邮件、管理计划、起草邮件。它们只能访问开启了"允许 AI 读取"的邮箱。'}
+    >
       <div className="card">
         {(tokens.data || []).map((t) => (
           <Row
@@ -104,7 +99,7 @@ function ConnectInner() {
           </div>
         </div>
       )}
-    </section>
+    </Section>
   );
 }
 

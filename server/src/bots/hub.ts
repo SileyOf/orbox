@@ -149,7 +149,7 @@ async function userOfChat(platform: Platform, chatId: string): Promise<User | un
 }
 
 const notLinked = () =>
-  `尚未绑定 ${siteConfig().name} 账号。请在网页「设置 → 通知渠道」里生成绑定码，再把绑定码发给我。`;
+  `尚未绑定 ${siteConfig().name} 账号。请在网页「设置 → 通知」里生成绑定码，再把绑定码发给我。`;
 
 /** 适配器收到文字消息时调用 */
 export async function inboundText(platform: Platform, chatId: string, text: string, username: string, io: BotIO) {

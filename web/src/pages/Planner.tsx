@@ -260,7 +260,7 @@ export function Planner() {
         </div>
         <Calendar month={month} setMonth={setMonth} selected={day} onSelect={(d) => setDay(day && dayKey(day) === dayKey(d) ? null : d)} busy={busyDays} />
         <div className="muted small">
-          到点会推送到你在 设置 → 通知渠道 里开启的渠道，聊天机器人里可直接点按钮完成或稍后再提醒；没处理的任务默认每 {user.settings.nagInterval || '—'} 分钟再提醒一次。
+          到点会推送到你在 设置 → 通知 里开启的渠道，聊天机器人里可直接点按钮完成或稍后再提醒；没处理的任务默认每 {user.settings.nagInterval || '—'} 分钟再提醒一次。
         </div>
       </aside>
 

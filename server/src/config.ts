@@ -26,7 +26,7 @@ let saved = readSaved();
 const env = process.env;
 
 export const APP_NAME = 'Orbox';
-export const APP_VERSION = '0.6.0';
+export const APP_VERSION = '0.7.0';
 
 export const config = {
   port: Number(process.env.PORT || 8787),
@@ -65,6 +65,12 @@ export const config = {
     clientId: process.env.MS_CLIENT_ID || '',
     clientSecret: process.env.MS_CLIENT_SECRET || '',
   },
+  google: {
+    clientId: process.env.GOOGLE_CLIENT_ID || '',
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
+  },
+  /** 紧急开关：设为 true 时登录跳过两步验证（管理员被锁在外面时用，用完记得关） */
+  disable2fa: process.env.ORBOX_DISABLE_2FA === 'true',
 };
 
 /**

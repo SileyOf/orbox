@@ -302,7 +302,7 @@ export function Setup() {
 
         {step === 'admin' && (
           <form className="setup-form" onSubmit={submitAdmin}>
-            <p className="muted small">创建管理员账号，用它登录 Orbox。邮箱只是登录名，不需要真实存在；收发邮件的邮箱在登录后添加。</p>
+            <p className="muted small">创建管理员账号，用它登录 Orbox。建议填一个你真实能收信的邮箱：之后配置了系统发信，就能用它找回密码和接收登录验证码。收发邮件的邮箱在登录后添加。</p>
             <div className="setup-grid">
               <Field label="登录邮箱">
                 <input className="input" type="email" required value={admin.email} onChange={(e) => setAdmin({ ...admin, email: e.target.value })} autoComplete="username" autoFocus />

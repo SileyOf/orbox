@@ -51,6 +51,8 @@ async function cleanup() {
   lastCleanup = Date.now();
   await exec('DELETE FROM sessions WHERE expires_at < UTC_TIMESTAMP()');
   await exec('DELETE FROM bot_link_codes WHERE expires_at < UTC_TIMESTAMP()');
+  // 验证码记录留一小时用于限流，之后清掉
+  await exec('DELETE FROM auth_codes WHERE created_at < UTC_TIMESTAMP() - INTERVAL 2 HOUR');
 }
 
 async function tick() {

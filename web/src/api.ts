@@ -71,6 +71,9 @@ export interface User {
   settings: UserSettings;
   /** 只有管理员有：后台页面的地址 */
   adminPath?: string;
+  emailVerified: boolean;
+  /** 是否开启了两步验证 */
+  twoFactor: boolean;
   /** 管理员给这个用户开放的功能 */
   perms: { maxAccounts: number; sharedAi: boolean; ownAi: boolean; bots: boolean; mcp: boolean; privateHosts: boolean };
 }
@@ -99,6 +102,7 @@ export interface Account {
   smtp_secure: number;
   username: string;
   auth_type: 'password' | 'oauth';
+  oauth_provider: 'microsoft' | 'google' | null;
   ai_enabled: number;
   sieve_port?: number;
   signature: string | null;
@@ -257,6 +261,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public status: number,
+    /** 服务端返回的完整内容（有些错误带着下一步该做什么，例如需要先验证邮箱） */
+    public data: Record<string, any> = {},
   ) {
     super(message);
   }
@@ -270,7 +276,7 @@ export async function api<T = any>(path: string, init: { method?: string; body?:
     body: init.form ?? (init.body !== undefined ? JSON.stringify(init.body) : undefined),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(data.error || `请求失败（${res.status}）`, res.status);
+  if (!res.ok) throw new ApiError(data.error || `请求失败（${res.status}）`, res.status, data);
   return data as T;
 }
 

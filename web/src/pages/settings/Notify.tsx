@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Bell, Copy, Send } from 'lucide-react';
+import { Bell, CalendarClock, Copy, Filter, Plus, Send, UserCheck } from 'lucide-react';
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
@@ -91,10 +91,28 @@ export function NotifyPage() {
   }
 
   const enabledBots = (bots.data?.platforms || []).filter((p) => p.enabled);
+  const idleBots = (bots.data?.platforms || []).filter((p) => !p.enabled);
+  // 还没填地址的推送通道默认不占地方，点"添加"才展开
+  const [adding, setAdding] = useState<string[]>([]);
+  const PUSH = [
+    { id: 'bark', title: 'Bark（iOS）', status: '推送到 iPhone，验证码会自动进入剪贴板', placeholder: 'https://api.day.app/你的Key' },
+    { id: 'ntfy', title: 'ntfy', status: '填完整的主题地址，支持自建服务器', placeholder: 'https://ntfy.sh/你的主题' },
+    { id: 'webhook', title: 'Webhook', status: '每条通知以 JSON POST 到这个地址（title、body、text、url、code），可接企业微信、钉钉等', placeholder: 'https://example.com/hook' },
+  ] as const;
+  const shownPush = PUSH.filter((c) => s.channels[c.id] || adding.includes(c.id));
+  const hiddenPush = PUSH.filter((c) => !s.channels[c.id] && !adding.includes(c.id));
+  const activeNames = [
+    ...enabledBots.filter((p) => bots.data!.links.some((l) => l.platform === p.platform)).map((p) => p.label),
+    ...PUSH.filter((c) => s.channels[c.id]).map((c) => c.title.replace(/（.*）/, '')),
+  ];
 
   return (
     <>
       <Section
+        id="notify-channels"
+        icon={Bell}
+        defaultOpen
+        summary={activeNames.length ? activeNames.join('、') : '还没有接收通知的渠道'}
         title="通知渠道"
         hint={user.perms.bots ? '每个渠道可以单独选择接收哪些事件（点亮的会推送）。聊天机器人可以直接阅读全文、处理邮件和计划；推送通道只能单向通知。' : '管理员没有给你开放聊天机器人，只能使用下面的推送通道。'}
         action={
@@ -106,7 +124,7 @@ export function NotifyPage() {
         }
       >
         <div className="card">
-          {(bots.data?.platforms || []).map((p) => {
+          {enabledBots.map((p) => {
             const link = bots.data!.links.find((l) => l.platform === p.platform);
             return (
               <ChannelRow
@@ -115,11 +133,7 @@ export function NotifyPage() {
                 title={p.label}
                 active={!!link}
                 status={
-                  !p.enabled
-                    ? user.adminPath
-                      ? <>还没有配置机器人，<Link to={`/${user.adminPath}/integrations`}>去后台配置</Link></>
-                      : '管理员还没有启用这个平台'
-                    : !p.name
+                  !p.name
                       ? '正在连接…'
                       : link
                         ? `已绑定${link.username ? ` ${link.username}` : ''} · 机器人 ${p.name}`
@@ -135,15 +149,11 @@ export function NotifyPage() {
               />
             );
           })}
-          <ChannelRow id="bark" title="Bark（iOS）" active={!!s.channels.bark} status="推送到 iPhone，验证码会自动进入剪贴板">
-            <PushUrl name="bark" placeholder="https://api.day.app/你的Key" />
-          </ChannelRow>
-          <ChannelRow id="ntfy" title="ntfy" active={!!s.channels.ntfy} status="填完整的主题地址，支持自建服务器">
-            <PushUrl name="ntfy" placeholder="https://ntfy.sh/你的主题" />
-          </ChannelRow>
-          <ChannelRow id="webhook" title="Webhook" active={!!s.channels.webhook} status="每条通知以 JSON POST 到这个地址（title、body、text、url、code），可接企业微信、钉钉等">
-            <PushUrl name="webhook" placeholder="https://example.com/hook" />
-          </ChannelRow>
+          {shownPush.map((c) => (
+            <ChannelRow key={c.id} id={c.id} title={c.title} active={!!s.channels[c.id]} status={c.status}>
+              <PushUrl name={c.id} placeholder={c.placeholder} />
+            </ChannelRow>
+          ))}
           <ChannelRow id="browser" title="浏览器通知" active={false} status="页面在后台时用系统通知提醒新邮件和计划" actions={
             <button
               className="btn sm"
@@ -153,10 +163,33 @@ export function NotifyPage() {
               <Bell size={14} /> {'Notification' in window && Notification.permission === 'granted' ? '已开启' : '开启'}
             </button>
           } />
+          {(hiddenPush.length > 0 || (idleBots.length > 0 && !!user.adminPath)) && (
+            <div className="channel">
+              <div className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
+                <span className="muted small">添加：</span>
+                {hiddenPush.map((c) => (
+                  <button key={c.id} className="chip chip-add" onClick={() => setAdding([...adding, c.id])}>
+                    <Plus size={12} /> {c.title}
+                  </button>
+                ))}
+                {user.adminPath &&
+                  idleBots.map((p) => (
+                    <Link key={p.platform} className="chip chip-add" to={`/${user.adminPath}/integrations`} title="到后台配置这个平台的机器人">
+                      <Plus size={12} /> {p.label}
+                    </Link>
+                  ))}
+              </div>
+            </div>
+          )}
         </div>
       </Section>
 
-      <Section title="推送规则">
+      <Section
+        id="notify-rules"
+        icon={Filter}
+        title="推送规则"
+        summary={[s.notifyMail ? '新邮件通知开' : '新邮件通知关', s.importantOnly && '只推重要', s.quietStart !== s.quietEnd && `免打扰 ${s.quietStart}–${s.quietEnd}`].filter(Boolean).join(' · ')}
+      >
         <div className="card">
           <Setting title="新邮件通知" hint="每个邮箱还可以在邮箱设置里单独关闭">
             <Switch checked={s.notifyMail} onChange={(v) => set({ notifyMail: v })} />
@@ -179,12 +212,22 @@ export function NotifyPage() {
             <span className="muted">至</span>
             <input className="input" type="time" value={s.quietEnd} onChange={(e) => e.target.value && set({ quietEnd: e.target.value })} />
           </Setting>
+        </div>
+      </Section>
+
+      <Section id="notify-senders" icon={UserCheck} title="发件人规则" summary={`重点 ${s.vipSenders.length} 个 · 屏蔽 ${s.mutedSenders.length} 个`}>
+        <div className="card">
           <SenderRule title="重点发件人" hint="始终通知并加星标记，不受免打扰限制。每行一个邮箱地址或域名" value={s.vipSenders} onSave={(v) => set({ vipSenders: v })} />
           <SenderRule title="屏蔽通知的发件人" hint="这些发件人的邮件照常接收，但不推送。每行一个邮箱地址或域名" value={s.mutedSenders} onSave={(v) => set({ mutedSenders: v })} />
         </div>
       </Section>
 
-      <Section title="计划与早报">
+      <Section
+        id="notify-planner"
+        icon={CalendarClock}
+        title="计划与早报"
+        summary={`${s.digestTime ? `早报 ${s.digestTime}` : '早报关'} · ${s.nagInterval ? `没处理每 ${s.nagInterval} 分钟再提醒` : '只提醒一次'}`}
+      >
         <div className="card">
           <Setting title="每日早报" hint="汇总今天的计划和未读邮件数">
             {s.digestTime && <input className="input" type="time" value={s.digestTime} onChange={(e) => e.target.value && set({ digestTime: e.target.value })} />}
