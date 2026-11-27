@@ -1,5 +1,5 @@
-import { useQuery } from '@tanstack/react-query';
-import { Filter, Pencil, Plus, Trash2, X } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { ExternalLink, Filter, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -70,6 +70,7 @@ const PRESETS: Record<string, { label: string; imap?: string; smtp?: string; hin
 
 function AccountDialog({ account, onClose }: { account: Account | null; onClose: () => void }) {
   const user = useUser();
+  const qc = useQueryClient();
   const [preset, setPreset] = useState('mailcow');
   const [f, setF] = useState({
     name: account?.name ?? '',
@@ -91,19 +92,62 @@ function AccountDialog({ account, onClose }: { account: Account | null; onClose:
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const providers = useQuery({ queryKey: ['oauth-providers'], queryFn: () => api<{ microsoft: boolean; google: boolean }>('/oauth/providers') });
+  const [callbackUrl, setCallbackUrl] = useState('');
+  const [authUrl, setAuthUrl] = useState('');
+  const [oauthBusy, setOauthBusy] = useState(false);
+  const providers = useQuery({
+    queryKey: ['oauth-providers'],
+    queryFn: () => api<{ microsoft: boolean; google: boolean; microsoftMode?: 'paste' | 'redirect' | null; googleMode?: 'paste' | 'redirect' | null }>('/oauth/providers'),
+  });
   const oauth = account ? account.auth_type === 'oauth' : preset === 'outlook';
   /** 这个邮箱（或正在添加的类型）走哪家的授权 */
   const provider: 'microsoft' | 'google' = account ? (account.oauth_provider === 'google' ? 'google' : 'microsoft') : preset === 'gmail' ? 'google' : 'microsoft';
   const providerName = provider === 'google' ? 'Google' : 'Microsoft';
-  const authorize = () => (location.href = `/api/oauth/${provider}/start${account ? `?hint=${encodeURIComponent(account.email)}` : ''}`);
+  const providerMode = provider === 'google' ? providers.data?.googleMode : providers.data?.microsoftMode;
   const set = <K extends keyof typeof f>(k: K, v: (typeof f)[K]) => setF((prev) => ({ ...prev, [k]: v }));
 
   function choosePreset(key: string) {
     setPreset(key);
+    setError('');
+    setAuthUrl('');
+    setCallbackUrl('');
     const p = PRESETS[key];
     // Gmail 会自动把发出的邮件存进"已发送"，再存一份会重复
     if (p.imap) setF((prev) => ({ ...prev, imap_host: p.imap!, smtp_host: p.smtp!, imap_port: 993, smtp_port: 465, imap_secure: true, smtp_secure: true, save_sent: key !== 'gmail' }));
+  }
+
+  async function openAuthorize() {
+    if (providerMode === 'redirect') {
+      location.href = `/api/oauth/${provider}/start${account ? `?hint=${encodeURIComponent(account.email)}` : ''}`;
+      return;
+    }
+    setError('');
+    setOauthBusy(true);
+    try {
+      const r = await api<{ url: string }>(`/oauth/${provider}/url${account ? `?hint=${encodeURIComponent(account.email)}` : ''}`);
+      setAuthUrl(r.url);
+      window.open(r.url, '_blank', 'noopener,noreferrer');
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setOauthBusy(false);
+    }
+  }
+
+  async function submitPasteOAuth() {
+    if (!callbackUrl.trim()) return setError('请先粘贴浏览器跳转后的回调地址');
+    setError('');
+    setOauthBusy(true);
+    try {
+      const r = await api<{ email: string }>(`/oauth/${provider}/exchange`, { body: { callbackUrl } });
+      await qc.invalidateQueries({ queryKey: ['accounts'] });
+      toast(`${r.email} 已连接，正在同步`);
+      onClose();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setOauthBusy(false);
+    }
   }
 
   async function submit(e: FormEvent) {
@@ -128,6 +172,35 @@ function AccountDialog({ account, onClose }: { account: Account | null; onClose:
     }
   }
 
+  const pastePanel = (
+    <div className="card" style={{ padding: 14, display: 'grid', gap: 10 }}>
+      <div className="row" style={{ flexWrap: 'wrap' }}>
+        <button type="button" className="btn primary sm" disabled={oauthBusy || !providers.data?.[provider]} onClick={openAuthorize}>
+          <ExternalLink size={14} /> 1. 打开 {providerName} 授权页面
+        </button>
+        {authUrl && (
+          <a className="btn ghost sm" href={authUrl} target="_blank" rel="noopener noreferrer">
+            未弹出窗口？点此手动打开
+          </a>
+        )}
+      </div>
+      <div className="muted small">
+        登录后点允许，浏览器会跳转到 <code>localhost</code> 并提示“无法访问此网站”——这是正常的。把浏览器地址栏里整串以 <code>http://localhost</code> 或 <code>https://localhost</code> 开头的网址复制粘贴到下面：
+      </div>
+      <div className="row">
+        <input
+          className="input grow"
+          placeholder="粘贴 https://localhost/?code=... 或 http://localhost/?code=..."
+          value={callbackUrl}
+          onChange={(e) => setCallbackUrl(e.target.value)}
+        />
+        <button type="button" className="btn accent sm" disabled={oauthBusy || !callbackUrl.trim()} onClick={submitPasteOAuth}>
+          {oauthBusy ? '验证中…' : '2. 完成绑定'}
+        </button>
+      </div>
+    </div>
+  );
+
   return (
     <div className="backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <form className="dialog" onSubmit={submit}>
@@ -144,12 +217,15 @@ function AccountDialog({ account, onClose }: { account: Account | null; onClose:
         )}
         {oauth && !account && (
           <>
-            <button type="button" className="btn primary" disabled={!providers.data?.microsoft} onClick={authorize}>
-              使用 Microsoft 账号登录
-            </button>
+            {providerMode === 'paste' ? pastePanel : (
+              <button type="button" className="btn primary" disabled={!providers.data?.microsoft} onClick={openAuthorize}>
+                使用 Microsoft 账号登录
+              </button>
+            )}
             {providers.data && !providers.data.microsoft && (
               <div className="muted small">{user.adminPath ? <>还没有配置 Microsoft 登录，请到 后台 → 集成 里配置。</> : '管理员还没有配置 Microsoft 登录。'}</div>
             )}
+            {error && <div style={{ color: 'var(--danger)' }}>{error}</div>}
             <div className="dialog-foot">
               <button type="button" className="btn ghost" onClick={onClose}>取消</button>
             </div>
@@ -162,8 +238,11 @@ function AccountDialog({ account, onClose }: { account: Account | null; onClose:
                 <div>{account.email}</div>
                 <div className="muted small">通过 {providerName} 登录。连接失败或提示授权失效时重新授权即可</div>
               </div>
-              <button type="button" className="btn sm" disabled={!providers.data?.[provider]} onClick={authorize}>重新授权</button>
+              {providerMode !== 'paste' && (
+                <button type="button" className="btn sm" disabled={!providers.data?.[provider]} onClick={openAuthorize}>重新授权</button>
+              )}
             </div>
+            {providerMode === 'paste' && pastePanel}
             <div className="grid2">
               <label className="field">
                 <span>显示名称</span>
@@ -178,9 +257,11 @@ function AccountDialog({ account, onClose }: { account: Account | null; onClose:
         )}
         {!oauth && !account && preset === 'gmail' && providers.data?.google && (
           <>
-            <button type="button" className="btn primary" onClick={authorize}>
-              使用 Google 账号登录（推荐）
-            </button>
+            {providerMode === 'paste' ? pastePanel : (
+              <button type="button" className="btn primary" onClick={openAuthorize}>
+                使用 Google 账号登录（推荐）
+              </button>
+            )}
             <div className="muted small" style={{ textAlign: 'center' }}>或者用应用专用密码：</div>
           </>
         )}

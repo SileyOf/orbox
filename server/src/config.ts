@@ -69,6 +69,13 @@ export const config = {
     clientId: process.env.GOOGLE_CLIENT_ID || '',
     clientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
   },
+  /** Gmail 免配置 paste 模式使用的桌面端 OAuth 客户端（可选，未配置网页 OAuth 时自动降级使用） */
+  googleDesktop: {
+    clientId: process.env.GOOGLE_DESKTOP_CLIENT_ID || '',
+    clientSecret: process.env.GOOGLE_DESKTOP_CLIENT_SECRET || '',
+  },
+  /** Outlook 免配置 paste 模式使用的公共客户端 ID（默认 Mozilla Thunderbird）；设为空字符串可禁用 */
+  msPublicClientId: process.env.MS_PUBLIC_CLIENT_ID ?? '9e5f94bc-e8a4-4e73-b8be-63364c29d753',
   /** 紧急开关：设为 true 时登录跳过两步验证（管理员被锁在外面时用，用完记得关） */
   disable2fa: process.env.ORBOX_DISABLE_2FA === 'true',
 };
