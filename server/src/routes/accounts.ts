@@ -10,7 +10,17 @@ import { emit } from '../events.js';
 import { connParams, startAccount, stopAccount, testConnection, worker } from '../mail/manager.js';
 import { SCRIPT_NAME, SieveClient, buildScript, parseScript, ruleSchema } from '../mail/sieve.js';
 import type { AccountRow } from '../mail/manager.js';
-import { exchangeOAuthCode, forgetAccessToken, isOAuthProvider, oauthAuthUrl, oauthEnabled, oauthLabel } from '../mail/oauth.js';
+import {
+  encodeRefreshToken,
+  exchangeOAuthCode,
+  forgetAccessToken,
+  isOAuthProvider,
+  oauthAuthUrl,
+  oauthEnabled,
+  oauthLabel,
+  oauthMode,
+} from '../mail/oauth.js';
+import type { OAuthGrant, OAuthProvider } from '../mail/oauth.js';
 
 const host = z.string().trim().min(1).max(190);
 const port = z.number().int().min(1).max(65535);
@@ -45,6 +55,43 @@ const CONN_FIELDS = ['imap_host', 'imap_port', 'imap_secure', 'smtp_host', 'smtp
 async function checkHosts(user: User, b: { imap_host: string; smtp_host: string }) {
   await assertPublicHost(user, b.imap_host, 'IMAP 服务器');
   await assertPublicHost(user, b.smtp_host, 'SMTP 服务器');
+}
+
+async function saveOAuthAccount(userId: number, maxAccounts: number, provider: OAuthProvider, grant: OAuthGrant) {
+  const conn = {
+    imap_host: grant.imapHost, imap_port: 993, imap_secure: 1,
+    smtp_host: grant.smtpHost, smtp_port: grant.smtpPort, smtp_secure: +grant.smtpSecure,
+    username: grant.email,
+  };
+  await testConnection({ ...conn, accessToken: grant.accessToken });
+  const refresh = encodeRefreshToken(grant.refreshToken, grant.mode);
+  // 同一个邮箱再次授权视为"重新授权"，只更新凭据
+  const existing = await one<{ id: number }>(
+    `SELECT id FROM accounts WHERE user_id = ? AND email = ? AND auth_type = 'oauth'`,
+    [userId, grant.email],
+  );
+  let id = existing?.id;
+  if (!id && maxAccounts && (await one<{ n: number }>('SELECT COUNT(*) AS n FROM accounts WHERE user_id = ?', [userId]))!.n >= maxAccounts) {
+    throw new Error(`最多只能添加 ${maxAccounts} 个邮箱，需要更多请联系管理员`);
+  }
+  if (id) {
+    forgetAccessToken(id);
+    await exec('UPDATE accounts SET oauth_refresh_enc = ?, oauth_provider = ?, smtp_host = ?, smtp_port = ?, smtp_secure = ?, last_error = NULL WHERE id = ?', [
+      refresh, provider, grant.smtpHost, conn.smtp_port, conn.smtp_secure, id,
+    ]);
+  } else {
+    // Outlook 和 Gmail 发信后都会自己存一份到"已发送"，不需要我们再存（否则会出现两封）
+    const res = await exec(
+      `INSERT INTO accounts (user_id, name, email, from_name, color, imap_host, imap_port, imap_secure,
+         smtp_host, smtp_port, smtp_secure, username, auth_type, oauth_provider, password_enc, oauth_refresh_enc, save_sent)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'oauth', ?, '', ?, 0)`,
+      [userId, provider === 'google' ? 'Gmail' : 'Outlook', grant.email, grant.name, provider === 'google' ? '#e55c60' : '#3985ee',
+       conn.imap_host, conn.imap_port, conn.imap_secure, conn.smtp_host, conn.smtp_port, conn.smtp_secure, conn.username, provider, refresh],
+    );
+    id = res.insertId;
+  }
+  await startAccount(id);
+  emit(userId, { type: 'accounts' });
 }
 
 export async function accountRoutes(app: FastifyInstance) {
@@ -201,7 +248,35 @@ export async function accountRoutes(app: FastifyInstance) {
     }
   });
 
-  app.get('/api/oauth/providers', async () => ({ microsoft: oauthEnabled('microsoft'), google: oauthEnabled('google') }));
+  app.get('/api/oauth/providers', async () => ({
+    microsoft: oauthEnabled('microsoft'),
+    google: oauthEnabled('google'),
+    microsoftMode: oauthMode('microsoft'),
+    googleMode: oauthMode('google'),
+  }));
+
+  // paste 模式：返回授权地址，由前端打开新窗口登录后将 localhost 回调地址粘回 /exchange
+  app.get<{ Params: { provider: string }; Querystring: { hint?: string } }>('/api/oauth/:provider/url', async (req, reply) => {
+    const provider = req.params.provider;
+    if (!isOAuthProvider(provider)) return reply.code(404).send({ error: '未知的登录方式' });
+    if (!oauthEnabled(provider)) return reply.code(400).send({ error: `服务器未配置 ${oauthLabel(provider)} 登录` });
+    const state = randomToken(16);
+    return { url: oauthAuthUrl(provider, state, req.query.hint), mode: oauthMode(provider) };
+  });
+
+  app.post<{ Params: { provider: string } }>('/api/oauth/:provider/exchange', async (req, reply) => {
+    const provider = req.params.provider;
+    if (!isOAuthProvider(provider)) return reply.code(404).send({ error: '未知的登录方式' });
+    if (!oauthEnabled(provider)) return reply.code(400).send({ error: `服务器未配置 ${oauthLabel(provider)} 登录` });
+    const { callbackUrl } = z.object({ callbackUrl: z.string().trim().min(1, '请粘贴授权后的回调地址') }).parse(req.body);
+    try {
+      const grant = await exchangeOAuthCode(provider, callbackUrl, 'paste');
+      await saveOAuthAccount(req.user.id, req.user.perms.maxAccounts, provider, grant);
+      return { ok: true, email: grant.email };
+    } catch (e: any) {
+      return reply.code(400).send({ error: e.message });
+    }
+  });
 
   // 浏览器整页跳转到 Microsoft / Google 登录；state 同时存进 cookie，回调时比对以防跨站伪造
   app.get<{ Params: { provider: string }; Querystring: { hint?: string } }>('/api/oauth/:provider/start', async (req, reply) => {
@@ -230,41 +305,8 @@ export async function accountRoutes(app: FastifyInstance) {
       if (q.error) return done({ oauth_error: q.error_description?.split('\n')[0] || (q.error === 'access_denied' ? '你取消了授权' : q.error) });
       if (!q.code || !q.state || q.state !== req.cookies[OAUTH_COOKIE]) return done({ oauth_error: '授权已过期，请重试' });
       try {
-        const grant = await exchangeOAuthCode(provider, q.code);
-        const conn = {
-          imap_host: grant.imapHost, imap_port: 993, imap_secure: 1,
-          smtp_host: grant.smtpHost, smtp_port: grant.smtpPort, smtp_secure: +grant.smtpSecure,
-          username: grant.email,
-        };
-        await testConnection({ ...conn, accessToken: grant.accessToken });
-        const refresh = encrypt(grant.refreshToken);
-        // 同一个邮箱再次授权视为"重新授权"，只更新凭据
-        const existing = await one<{ id: number }>(
-          `SELECT id FROM accounts WHERE user_id = ? AND email = ? AND auth_type = 'oauth'`,
-          [req.user.id, grant.email],
-        );
-        let id = existing?.id;
-        const max = req.user.perms.maxAccounts;
-        if (!id && max && (await one<{ n: number }>('SELECT COUNT(*) AS n FROM accounts WHERE user_id = ?', [req.user.id]))!.n >= max)
-          return done({ oauth_error: `最多只能添加 ${max} 个邮箱，需要更多请联系管理员` });
-        if (id) {
-          forgetAccessToken(id);
-          await exec('UPDATE accounts SET oauth_refresh_enc = ?, oauth_provider = ?, smtp_host = ?, last_error = NULL WHERE id = ?', [
-            refresh, provider, grant.smtpHost, id,
-          ]);
-        } else {
-          // Outlook 和 Gmail 发信后都会自己存一份到"已发送"，不需要我们再存（否则会出现两封）
-          const res = await exec(
-            `INSERT INTO accounts (user_id, name, email, from_name, color, imap_host, imap_port, imap_secure,
-               smtp_host, smtp_port, smtp_secure, username, auth_type, oauth_provider, password_enc, oauth_refresh_enc, save_sent)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'oauth', ?, '', ?, 0)`,
-            [req.user.id, provider === 'google' ? 'Gmail' : 'Outlook', grant.email, grant.name, provider === 'google' ? '#e55c60' : '#3985ee',
-             conn.imap_host, conn.imap_port, conn.imap_secure, conn.smtp_host, conn.smtp_port, conn.smtp_secure, conn.username, provider, refresh],
-          );
-          id = res.insertId;
-        }
-        await startAccount(id);
-        emit(req.user.id, { type: 'accounts' });
+        const grant = await exchangeOAuthCode(provider, q.code, 'redirect');
+        await saveOAuthAccount(req.user.id, req.user.perms.maxAccounts, provider, grant);
         return done({ oauth: provider });
       } catch (e: any) {
         return done({ oauth_error: e.message });

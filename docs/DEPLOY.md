@@ -163,7 +163,10 @@ box.example.com {
 
 ## 7. 启用 Outlook 登录（可选）
 
-Outlook / Hotmail / Microsoft 365 已停用密码登录，必须注册一个 Microsoft 应用走 OAuth。
+Outlook / Hotmail / Microsoft 365 已停用密码登录，必须走 OAuth。Orbox 支持两种模式：
+
+- **免配置 `paste` 模式（默认开箱即用）**：当未配置自定义 Web OAuth（`MS_CLIENT_ID` / `MS_CLIENT_SECRET`）时，自动使用公共桌面客户端（默认 Mozilla Thunderbird 的公开 Client ID，可通过 `MS_PUBLIC_CLIENT_ID` 覆盖，设为 `MS_PUBLIC_CLIENT_ID=` 可禁用）。在「添加邮箱 → Outlook」点击授权页登录后，将浏览器跳转到的 `https://localhost/?code=...` 完整地址粘贴回弹窗即可完成绑定，无需注册 Entra 应用或设置公网回调。
+- **自定义 Web 应用 `redirect` 模式**：如需使用自己的 Entra 应用并支持整页自动跳转回调，按下面步骤配置（配置后自动优先使用 `redirect` 模式）：
 
 1. 打开 [Microsoft Entra 管理中心](https://entra.microsoft.com) → 应用注册 → 新注册。
 2. 受支持的帐户类型选 **"任何组织目录中的帐户和个人 Microsoft 帐户"**。
@@ -182,14 +185,16 @@ Outlook / Hotmail / Microsoft 365 已停用密码登录，必须注册一个 Mic
 
 ## 7.1 启用 Gmail 登录（可选）
 
-不配置也能添加 Gmail：在 Google 账号里开启两步验证后生成"应用专用密码"，按普通邮箱添加即可。配置 OAuth 后用户可以直接点"使用 Google 账号登录"。
+不配置也能添加 Gmail：在 Google 账号里开启两步验证后生成"应用专用密码"，按普通邮箱添加即可。配置 OAuth 后支持两种方式：
 
-在 后台 → 集成 → Gmail 登录（Google）里有带链接的分步说明，要点是：
+- **自定义 Web 应用 `redirect` 模式**（后台 → 集成 或 `.env` 的 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`）：标准跳转回调，在 后台 → 集成 → Gmail 登录（Google）里有带链接的分步说明，要点是：
 
 1. 在 [Google Cloud Console](https://console.cloud.google.com/apis/credentials) 新建项目，启用 **Gmail API**。
 2. 配置"OAuth 权限请求页面"：用户类型选"外部"，添加范围 `https://mail.google.com/`，把要用的 Gmail 地址加到"测试用户"。
 3. 创建"OAuth 客户端 ID"，类型选"Web 应用"，重定向 URI 填 `https://你的域名/api/oauth/google/callback`（后台页面上有可复制的完整地址）。
 4. 把客户端 ID 和密钥填到后台（或 `.env` 的 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`）。
+
+- **桌面端 `paste` 模式**（未配置 Web 应用时自动降级启用）：如果不想暴露/配置公网回调域名，可在 Google Cloud Console 创建类型为 **"桌面应用"（Desktop app）** 的 OAuth 客户端，将凭据写入 `.env` 的 `GOOGLE_DESKTOP_CLIENT_ID` / `GOOGLE_DESKTOP_CLIENT_SECRET`。前端将自动切换为「打开授权页 → 粘贴 `http://localhost/?code=...` 回调地址」绑定流程。
 
 注意：
 - 应用处于"测试"状态时，Google 签发的授权 **7 天后过期**，届时邮箱会显示"授权已失效"，重新授权即可。自己长期使用可以在权限请求页面点"发布应用"——不提交审核也能用，只是授权时会多一个"此应用未经 Google 验证"的提示（点"高级 → 继续"）。
